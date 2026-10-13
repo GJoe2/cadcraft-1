@@ -1,0 +1,30 @@
+{
+    "format": "cadcraft-devshell",
+    "version": 1,
+    "app": {
+        "slug": "cadcraft",
+        "name": "CadCraft",
+        "layer": "red",
+        "role": "2D drafting & documentation",
+        "tagline": "The drafting table you already know how to use.",
+        "short": "Command-line drafting with layers, blocks, dimensions and layouts that plot. Opens and saves DWG and DXF."
+    },
+    "others": {
+        "bimcraft": "BimCraft",
+        "modelcraft": "ModelCraft",
+        "markupcraft": "MarkupCraft",
+        "takeoffcraft": "TakeoffCraft",
+        "civilcraft": "CivilCraft",
+        "detailcraft": "DetailCraft",
+        "partcraft": "PartCraft"
+    },
+    "vendor": {
+        "manifold-3d": "3.5.4",
+        "three": "0.186.1"
+    },
+    "origin": "https://getcadcraft.com",
+    "packed": {
+        "at": "2026-10-13T20:37:08Z",
+        "build": "0.4"
+    }
+}

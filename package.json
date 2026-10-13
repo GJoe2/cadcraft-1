@@ -1,0 +1,13 @@
+{
+    "name": "cadcraft",
+    "private": true,
+    "description": "CadCraft — 2D drafting & documentation (the CadCraft family)",
+    "scripts": {
+        "start": "node devshell/serve.mjs",
+        "test": "node devshell/test.mjs",
+        "fetch-vendor": "node devshell/fetch-vendor.mjs"
+    },
+    "engines": {
+        "node": ">=20.19"
+    }
+}
