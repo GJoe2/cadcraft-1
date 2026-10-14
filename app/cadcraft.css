@@ -174,19 +174,19 @@
   max-height: none;
 }
 
-/* 2 rows: wraps tool groups across 2 rows */
+/* 2 rows: wraps tool groups across 2 rows, fully enveloping all icons without vertical cutting */
 .cc[data-ribbon-rows="2"] .cc-tools {
   flex-wrap: wrap;
   overflow-x: auto;
-  overflow-y: auto;
-  max-height: 7.5rem;
-  scrollbar-width: thin;
+  overflow-y: hidden;
+  max-height: none;
 }
-.cc[data-ribbon="symbols"][data-ribbon-rows="2"] .cc-tools {
-  max-height: 4.8rem;
+.cc[data-ribbon-rows="2"]:not([data-ribbon="symbols"]):not([data-ribbon="text"]) .cc-tool {
+  min-width: 2.35rem;
+  padding: .2rem .18rem .18rem;
 }
-.cc[data-ribbon="text"][data-ribbon-rows="2"] .cc-tools {
-  max-height: 4.2rem;
+.cc[data-ribbon-rows="2"]:not([data-ribbon="symbols"]):not([data-ribbon="text"]) .cc-tool-group {
+  padding: .2rem .25rem .25rem;
 }
 
 /* Auto-wrap: fluid multi-row wrap without height restriction */
