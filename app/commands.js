@@ -3262,6 +3262,8 @@ def('DXFOUT', [], async (c) => { await c.host.saveFile?.('dxf', false); }, { noR
 def('HELP', ['?'], async (c) => {
   for (const k of commandList()) c.print(k.name + (k.aliases.length ? ' (' + k.aliases.join(', ') + ')' : '') + ' — ' + k.help);
 }, { noRepeat: true, keepSelection: true, help: () => t('cmd.help.list') });
+def('RIBBON', [], async (c) => { c.host.setRibbon?.('full'); }, { noRepeat: true, help: () => 'Show the ribbon toolbar (Ctrl+F1)' });
+def('RIBBONCLOSE', [], async (c) => { c.host.setRibbon?.('hidden'); }, { noRepeat: true, help: () => 'Hide the ribbon toolbar (Ctrl+F1)' });
 
 // ---- parametric: GEOMCONSTRAINT / GC*, DIMCONSTRAINT / DC*, PARAMETERS, CONSTRAINTBAR, DELCONSTRAINT, AUTOCONSTRAIN (pcommands.js)
 // The command registry add-ons use (0.4 part 2 A.3, docs/ADDONS-SPEC.md §5.4; addons/commands-api.js): CadCraft's own feature

@@ -150,6 +150,9 @@ $__more = [
 ?>
 <main id="main" class="cc" data-cadcraft<?php if ($__3dUrl): ?> data-open3d-url="<?= e($__3dUrl) ?>" data-open3d-app="<?= e($__3dApp['name']) ?>"<?php endif; ?><?php if ($__bimUrl): ?> data-bim-url="<?= e($__bimUrl) ?>"<?php endif; ?>>
   <h1 class="visually-hidden"><?= Lang::e('ui.h1', ['app' => $app['name']]) ?></h1>
+  <button type="button" class="cc-ribbon-unhide" data-ribbon-cycle title="Show ribbon (Ctrl+F1)" aria-label="Show ribbon">
+    <i class="bi bi-chevron-down" aria-hidden="true"></i><span>Show ribbon</span>
+  </button>
 
   <div class="cc-tools" role="toolbar" aria-label="<?= Lang::e('ui.tools') ?>">
     <?php foreach ($__tools as $__group => $__items): ?>
@@ -226,6 +229,11 @@ $__more = [
         </div>
       </div>
     <?php endforeach; ?>
+    <div class="cc-tools-end">
+      <button type="button" class="cc-ribbon-cycle-btn" data-ribbon-cycle title="Cycle ribbon: Full / Small symbols / Just text / Hide (Ctrl+F1)" aria-label="Cycle ribbon display">
+        <i class="bi bi-chevron-bar-up" aria-hidden="true"></i><span>Minimize</span>
+      </button>
+    </div>
     <input type="file" class="visually-hidden" accept=".dwg,.dxf,.json,.ccsheets,.pln,.pla,.tpl,.bpn,.las,.laz,.xyz,.pts" tabindex="-1" aria-hidden="true" data-file>
   </div>
 
