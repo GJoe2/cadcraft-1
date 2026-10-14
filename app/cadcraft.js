@@ -138,13 +138,15 @@ function init(root) {
   if (settingsDlg) {
     settingsDlg.querySelectorAll('input[name="ccCursor"]').forEach((r) => { r.checked = r.value === settings.cursor; });
     for (const [name, key] of Object.entries(RADIO_SETTINGS)) settingsDlg.querySelectorAll('input[name="' + name + '"]').forEach((r) => { r.checked = r.value === settings[key]; });
+    settingsDlg.querySelectorAll('input[name="ccRibbonRows"]').forEach((r) => { r.checked = r.value === ribbonRowsState; });
     settingsDlg.addEventListener('change', (e) => {
       if (e.target.name === 'ccCursor') setCursor(e.target.value);
+      else if (e.target.name === 'ccRibbonRows') applyRibbonRows(e.target.value);
       else if (RADIO_SETTINGS[e.target.name]) setRadio(e.target.name, e.target.value);
       if (e.target.name === 'ccCorner') applyCorner();
       if (e.target.name === 'ccTabs') renderTabs();
     });
-    settingsDlg.addEventListener('cc-settings-reset', () => { setCursor('medium'); setRadio('ccPaste', 'lower-left'); setRadio('ccPick', 'add'); setRadio('ccCorner', 'auto'); setRadio('ccLasso', 'lasso'); setRadio('ccTabs', 'full'); applyCorner(); renderTabs(); });
+    settingsDlg.addEventListener('cc-settings-reset', () => { setCursor('medium'); setRadio('ccPaste', 'lower-left'); setRadio('ccPick', 'add'); setRadio('ccCorner', 'auto'); setRadio('ccLasso', 'lasso'); setRadio('ccTabs', 'full'); applyCorner(); renderTabs(); applyRibbonRows('1'); });
   }
 
   // The clipboard: this tab's copy + localStorage, so another tab can paste (storage may be off: memory only).
@@ -341,10 +343,10 @@ function init(root) {
   // ---- ribbon cycle: full -> symbols -> text -> hidden (AutoCAD style, Ctrl+F1) ----
   const RIBBON_MODES = ['full', 'symbols', 'text', 'hidden'];
   const RIBBON_TITLES = {
-    full: 'Ribbon: Full (Big icons) — Click for Small symbols (Ctrl+F1)',
-    symbols: 'Ribbon: Small symbols — Click for Just text (Ctrl+F1)',
-    text: 'Ribbon: Just text — Click to Hide ribbon (Ctrl+F1)',
-    hidden: 'Ribbon: Hidden — Click to Restore full ribbon (Ctrl+F1)',
+    full: 'Ribbon: Full (Big icons) — Click for Small symbols (Ctrl+F1, Shift+click for rows)',
+    symbols: 'Ribbon: Small symbols — Click for Just text (Ctrl+F1, Shift+click for rows)',
+    text: 'Ribbon: Just text — Click to Hide ribbon (Ctrl+F1, Shift+click for rows)',
+    hidden: 'Ribbon: Hidden — Click to Restore full ribbon (Ctrl+F1, Shift+click for rows)',
   };
   const RIBBON_ICONS = {
     full: 'bi-chevron-bar-up',
@@ -398,24 +400,65 @@ function init(root) {
     applyRibbonState(RIBBON_MODES[nextIdx]);
   };
 
+  // ---- ribbon rows / layers: 1 (single row), 2 (two rows), auto (fluid wrap) ----
+  const RIBBON_ROW_OPTIONS = ['1', '2', 'auto'];
+  let ribbonRowsState = (() => {
+    try {
+      const r = localStorage.getItem('cadcraft.ribbon_rows');
+      return RIBBON_ROW_OPTIONS.includes(r) ? r : '1';
+    } catch {
+      return '1';
+    }
+  })();
+
+  function applyRibbonRows(mode) {
+    if (!RIBBON_ROW_OPTIONS.includes(mode)) mode = '1';
+    ribbonRowsState = mode;
+    root.setAttribute('data-ribbon-rows', mode);
+    try { localStorage.setItem('cadcraft.ribbon_rows', mode); } catch {}
+    settingsDlg?.querySelectorAll('input[name="ccRibbonRows"]').forEach((r) => {
+      r.checked = r.value === mode;
+    });
+    view.resize();
+  }
+
+  function cycleRibbonRows() {
+    const nextIdx = (RIBBON_ROW_OPTIONS.indexOf(ribbonRowsState) + 1) % RIBBON_ROW_OPTIONS.length;
+    const nextMode = RIBBON_ROW_OPTIONS[nextIdx];
+    applyRibbonRows(nextMode);
+    const label = nextMode === '1' ? '1 row (scrollable)' : nextMode === '2' ? '2 rows' : 'Auto-wrap';
+    print(`Ribbon rows: ${label}`);
+  }
+
   document.addEventListener('click', (e) => {
     const btn = e.target.closest('[data-ribbon-cycle]');
     if (btn) {
       e.preventDefault();
-      cycleRibbon();
+      if (e.shiftKey) {
+        cycleRibbonRows();
+      } else {
+        cycleRibbon();
+      }
     }
   });
 
   window.addEventListener('keydown', (e) => {
     if (e.key === 'F1' && e.ctrlKey && !e.altKey && !e.metaKey) {
       e.preventDefault();
-      cycleRibbon();
+      if (e.shiftKey) {
+        cycleRibbonRows();
+      } else {
+        cycleRibbon();
+      }
     }
   });
 
   host.setRibbon = (mode) => applyRibbonState(mode);
+  host.setRibbonRows = (mode) => applyRibbonRows(mode);
+  host.getRibbonRows = () => ribbonRowsState;
 
   applyRibbonState(ribbonState);
+  applyRibbonRows(ribbonRowsState);
 
   // toolbar menus (Edit › More): one open at a time, closed by a click elsewhere or Esc
   function closeMenus(except = null) { for (const d of root.querySelectorAll('details.cc-menu[open]')) if (d !== except) d.open = false; }

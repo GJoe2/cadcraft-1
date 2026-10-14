@@ -121,6 +121,18 @@ export class Engine {
     const typed = s.trim();
     if (!this.waiting) {
       if (!typed) { if (this.last) return this.run(this.last); return; }
+      const spaceIdx = typed.indexOf(' ');
+      if (spaceIdx > 0 && !lookup(typed)) {
+        const cmdPart = typed.slice(0, spaceIdx);
+        const argPart = typed.slice(spaceIdx + 1).trim();
+        if (lookup(cmdPart)) {
+          const runPromise = this.run(cmdPart);
+          if (argPart) {
+            setTimeout(() => { if (this.waiting) this.text(argPart); }, 0);
+          }
+          return runPromise;
+        }
+      }
       return this.run(typed);
     }
     const w = this.waiting;
@@ -3264,6 +3276,34 @@ def('HELP', ['?'], async (c) => {
 }, { noRepeat: true, keepSelection: true, help: () => t('cmd.help.list') });
 def('RIBBON', [], async (c) => { c.host.setRibbon?.('full'); }, { noRepeat: true, help: () => 'Show the ribbon toolbar (Ctrl+F1)' });
 def('RIBBONCLOSE', [], async (c) => { c.host.setRibbon?.('hidden'); }, { noRepeat: true, help: () => 'Hide the ribbon toolbar (Ctrl+F1)' });
+def('RIBBONROWS', ['RIBBONROW'], async (c) => {
+  const cur = c.host.getRibbonRows?.() || '1';
+  const hidden = (key) => ({ key, label: key, hidden: true });
+  const k = await c.keyword(t('cmd.ribbonrows.prompt', { cur }) || `Enter number of ribbon rows [1/2/Auto] <${cur}>:`, {
+    options: [
+      opt('1', '1 row'),
+      opt('2', '2 rows'),
+      opt('A', 'Auto-wrap'),
+      hidden('AUTO'),
+      hidden('WRAP'),
+      hidden('SINGLE'),
+      hidden('DOUBLE'),
+    ],
+    default: cur === 'auto' ? 'A' : cur,
+  });
+  const key = String(typeof k === 'string' ? k : k?.option || '').toUpperCase();
+  let mode = '1';
+  if (key === '2' || key === 'DOUBLE') mode = '2';
+  else if (key === 'A' || key === 'AUTO' || key === 'WRAP') mode = 'auto';
+  c.host.setRibbonRows?.(mode);
+  c.print(
+    mode === '1'
+      ? t('cmd.ribbonrows.set', { n: '1' }) || 'Ribbon rows: 1 (single row, scrollable)'
+      : mode === '2'
+      ? t('cmd.ribbonrows.set', { n: '2' }) || 'Ribbon rows: 2 rows'
+      : t('cmd.ribbonrows.set_auto') || 'Ribbon rows: Auto-wrap'
+  );
+}, { noRepeat: true, keepSelection: true, help: () => t('cmd.ribbonrows.help') || 'Set ribbon toolbar rows: 1 (single row), 2, or Auto (RIBBONROWS)' });
 
 // ---- parametric: GEOMCONSTRAINT / GC*, DIMCONSTRAINT / DC*, PARAMETERS, CONSTRAINTBAR, DELCONSTRAINT, AUTOCONSTRAIN (pcommands.js)
 // The command registry add-ons use (0.4 part 2 A.3, docs/ADDONS-SPEC.md §5.4; addons/commands-api.js): CadCraft's own feature

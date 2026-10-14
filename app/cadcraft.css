@@ -163,6 +163,39 @@
 .cc[data-ribbon="hidden"] {
   grid-template-rows: 0 1fr auto auto;
 }
+
+/* ---- Toolbar Rows / Layers Configuration ---- */
+/* 1 row (default): single row with horizontal scrollbar */
+.cc .cc-tools,
+.cc[data-ribbon-rows="1"] .cc-tools {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  max-height: none;
+}
+
+/* 2 rows: wraps tool groups across 2 rows */
+.cc[data-ribbon-rows="2"] .cc-tools {
+  flex-wrap: wrap;
+  overflow-x: auto;
+  overflow-y: auto;
+  max-height: 7.5rem;
+  scrollbar-width: thin;
+}
+.cc[data-ribbon="symbols"][data-ribbon-rows="2"] .cc-tools {
+  max-height: 4.8rem;
+}
+.cc[data-ribbon="text"][data-ribbon-rows="2"] .cc-tools {
+  max-height: 4.2rem;
+}
+
+/* Auto-wrap: fluid multi-row wrap without height restriction */
+.cc[data-ribbon-rows="auto"] .cc-tools {
+  flex-wrap: wrap;
+  overflow-x: visible;
+  overflow-y: visible;
+  max-height: none;
+}
 .cc-tool {
   display: flex;
   flex-direction: column;
