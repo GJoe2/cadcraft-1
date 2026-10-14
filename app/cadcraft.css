@@ -409,7 +409,22 @@ body:not([data-shell-tb="labels"]) .cc.cc-fit-compact .cc-tool > span {
   background: var(--sheet-2);
   border: var(--pen-2) solid var(--ink);
   border-radius: var(--radius);
-  pointer-events: none;
+  pointer-events: auto;
+}
+.cc-hint-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .5rem;
+  margin-bottom: .35rem;
+}
+.cc-hint-head .cc-hint-h {
+  margin: 0;
+}
+.cc-hint-close {
+  padding: .15rem .35rem;
+  font-size: .8125rem;
+  line-height: 1;
 }
 .cc-hint-h { margin: 0 0 .35rem; font-weight: 700; font-stretch: 112%; }
 .cc-dyn {   /* dynamic input (F12) by the crosshair */

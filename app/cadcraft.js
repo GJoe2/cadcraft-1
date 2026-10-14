@@ -691,6 +691,7 @@ function init(root) {
 
   ui.over.addEventListener('contextmenu', (e) => e.preventDefault());
   ui.over.addEventListener('pointerdown', (e) => {
+    if (ui.hint && !ui.hint.hidden) hideHint();
     if (e.pointerType === 'touch' && touchDown(e)) return;   // a second finger: pinch and pan (S.8)
     try { ui.over.setPointerCapture(e.pointerId); } catch { /* a synthetic or already-lifted pointer: nothing to capture */ }
     if (paneFromEvent(e) && e.button === 0) { down = null; return; }   // the first click into another pane only makes it active (as AutoCAD)
@@ -1024,6 +1025,7 @@ function init(root) {
   /** Esc: the typed text, then the command, then a grip move or box, then the selection (the key row's Esc too). */
   function escapeKey() {
     ui.input.value = ''; suggest();
+    if (ui.hint && !ui.hint.hidden) { hideHint(); return; }
     if (engine.escape()) return;
     if (cancelLocal()) return;
     if (host.selection.size) host.setSelection(new Set());
@@ -1241,7 +1243,22 @@ function init(root) {
     layersForViewport();
   });
 
-  function hideHint() { ui.hint.hidden = true; }
+  function hideHint() { if (ui.hint) ui.hint.hidden = true; }
+  const hintClose = ui.hint?.querySelector('[data-hint-close]');
+  if (hintClose) {
+    hintClose.addEventListener('click', (e) => {
+      e.stopPropagation();
+      hideHint();
+      focusCommandLine();
+    });
+  }
+  if (ui.stage) {
+    ui.stage.addEventListener('pointerdown', (e) => {
+      if (ui.hint && !ui.hint.hidden && !ui.hint.contains(e.target)) {
+        hideHint();
+      }
+    });
+  }
 
   /**
    * Back to the command line after a dialog. Closing a modal with the mouse leaves Chromium's

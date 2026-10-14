@@ -530,7 +530,10 @@
       <canvas class="cc-canvas cc-over" data-over aria-label="Drawing. Type commands at the command line below; the mouse picks points and objects."></canvas>
     </div>
     <div class="cc-hint" data-hint>
-      <p class="cc-hint-h">Start drawing</p>
+      <div class="cc-hint-head">
+        <p class="cc-hint-h">Start drawing</p>
+        <button type="button" class="cc-x cc-hint-close" data-hint-close aria-label="Close" title="Close"><i class="bi bi-x-lg" aria-hidden="true"></i></button>
+      </div>
       <ul>
         <li>Type <kbd>L</kbd> and press <kbd>Enter</kbd> for a line. Click points, or type <kbd>@100,0</kbd>; press <kbd>Enter</kbd> to finish.</li>
         <li><kbd>C</kbd> circle, <kbd>REC</kbd> rectangle, <kbd>TR</kbd> trim, <kbd>O</kbd> offset. Type <kbd>HELP</kbd> for every command.</li>
