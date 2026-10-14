@@ -123,6 +123,119 @@ function init(root) {
   view.lwDisplay = settings.lwt;
   view.cursorSize = settings.cursor;
 
+  // ---- ribbon cycle: full -> symbols -> text -> hidden (AutoCAD style, Ctrl+F1) ----
+  const RIBBON_MODES = ['full', 'symbols', 'text', 'hidden'];
+  const RIBBON_TITLES = {
+    full: 'Ribbon: Full (Big icons) — Click for Small symbols (Ctrl+F1, Shift+click for rows)',
+    symbols: 'Ribbon: Small symbols — Click for Just text (Ctrl+F1, Shift+click for rows)',
+    text: 'Ribbon: Just text — Click to Hide ribbon (Ctrl+F1, Shift+click for rows)',
+    hidden: 'Ribbon: Hidden — Click to Restore full ribbon (Ctrl+F1, Shift+click for rows)',
+  };
+  const RIBBON_ICONS = {
+    full: 'bi-chevron-bar-up',
+    symbols: 'bi-grid-3x2-gap',
+    text: 'bi-fonts',
+    hidden: 'bi-chevron-down',
+  };
+  const RIBBON_LABELS = {
+    full: 'Minimize',
+    symbols: 'Symbols',
+    text: 'Text',
+    hidden: 'Show ribbon',
+  };
+
+  let ribbonState = (() => {
+    try {
+      const s = localStorage.getItem('cadcraft.ribbon_state');
+      return RIBBON_MODES.includes(s) ? s : 'full';
+    } catch {
+      return 'full';
+    }
+  })();
+
+  const applyRibbonState = (mode) => {
+    if (!RIBBON_MODES.includes(mode)) mode = 'full';
+    ribbonState = mode;
+    root.setAttribute('data-ribbon', mode);
+    try { localStorage.setItem('cadcraft.ribbon_state', mode); } catch {}
+
+    const cycleBtns = document.querySelectorAll('[data-ribbon-cycle]');
+    cycleBtns.forEach((btn) => {
+      btn.title = RIBBON_TITLES[mode];
+      const icon = btn.querySelector('.bi');
+      if (icon) {
+        icon.className = `bi ${RIBBON_ICONS[mode]}`;
+      }
+      const label = btn.querySelector('span:not(.app-bar-btn-label)');
+      if (label) {
+        label.textContent = RIBBON_LABELS[mode];
+      }
+      if (btn.classList.contains('app-bar-btn')) {
+        btn.setAttribute('aria-pressed', String(mode === 'hidden'));
+      }
+    });
+
+    view.resize();
+  };
+
+  const cycleRibbon = () => {
+    const nextIdx = (RIBBON_MODES.indexOf(ribbonState) + 1) % RIBBON_MODES.length;
+    applyRibbonState(RIBBON_MODES[nextIdx]);
+  };
+
+  // ---- ribbon rows / layers: 1 (single row), 2 (two rows), auto (fluid wrap) ----
+  const RIBBON_ROW_OPTIONS = ['1', '2', 'auto'];
+  let ribbonRowsState = (() => {
+    try {
+      const r = localStorage.getItem('cadcraft.ribbon_rows');
+      return RIBBON_ROW_OPTIONS.includes(r) ? r : '1';
+    } catch {
+      return '1';
+    }
+  })();
+
+  function applyRibbonRows(mode) {
+    if (!RIBBON_ROW_OPTIONS.includes(mode)) mode = '1';
+    ribbonRowsState = mode;
+    root.setAttribute('data-ribbon-rows', mode);
+    try { localStorage.setItem('cadcraft.ribbon_rows', mode); } catch {}
+    settingsDlg?.querySelectorAll('input[name="ccRibbonRows"]').forEach((r) => {
+      r.checked = r.value === mode;
+    });
+    view.resize();
+  }
+
+  function cycleRibbonRows() {
+    const nextIdx = (RIBBON_ROW_OPTIONS.indexOf(ribbonRowsState) + 1) % RIBBON_ROW_OPTIONS.length;
+    const nextMode = RIBBON_ROW_OPTIONS[nextIdx];
+    applyRibbonRows(nextMode);
+    const label = nextMode === '1' ? '1 row (scrollable)' : nextMode === '2' ? '2 rows' : 'Auto-wrap';
+    if (typeof print === 'function') print(`Ribbon rows: ${label}`);
+  }
+
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-ribbon-cycle]');
+    if (btn) {
+      e.preventDefault();
+      if (e.shiftKey) {
+        cycleRibbonRows();
+      } else {
+        cycleRibbon();
+      }
+    }
+  });
+
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'F1' && e.ctrlKey && !e.altKey && !e.metaKey) {
+      e.preventDefault();
+      if (e.shiftKey) {
+        cycleRibbonRows();
+      } else {
+        cycleRibbon();
+      }
+    }
+  });
+
   // Cursor size lives in the shared Settings dialog (app-settings.inc includes this build's settings.inc).
   const settingsDlg = document.querySelector('[data-app-settings]');
   const setCursor = (size) => {
@@ -149,6 +262,9 @@ function init(root) {
     settingsDlg.addEventListener('cc-settings-reset', () => { setCursor('medium'); setRadio('ccPaste', 'lower-left'); setRadio('ccPick', 'add'); setRadio('ccCorner', 'auto'); setRadio('ccLasso', 'lasso'); setRadio('ccTabs', 'full'); applyCorner(); renderTabs(); applyRibbonRows('1'); });
   }
 
+  applyRibbonState(ribbonState);
+  applyRibbonRows(ribbonRowsState);
+
   // The clipboard: this tab's copy + localStorage, so another tab can paste (storage may be off: memory only).
   let clipStore = null;
   try { clipStore = window.localStorage; } catch { clipStore = null; }
@@ -159,6 +275,9 @@ function init(root) {
     cursor: null, selection: new Set(), shift: false,
     clipboard, settings,
     print, prompt: setPrompt,
+    setRibbon: (mode) => applyRibbonState(mode),
+    setRibbonRows: (mode) => applyRibbonRows(mode),
+    getRibbonRows: () => ribbonRowsState,
     setSelection(set) { host.selection = new Set(set); view.state.selection = host.selection; refreshGrips(); scheduleProps(); view.invalidate(); layersForViewport(); },
     pickAt: (p) => cycledAt(p) ?? view.pick(p),   // Tab cycling (cycleTab) wins while the pointer stays put
     pickWindow: (w, crossing) => view.pickWindow(w, crossing),
@@ -339,126 +458,6 @@ function init(root) {
       setTimeout(feed, 0);
     });
   }
-
-  // ---- ribbon cycle: full -> symbols -> text -> hidden (AutoCAD style, Ctrl+F1) ----
-  const RIBBON_MODES = ['full', 'symbols', 'text', 'hidden'];
-  const RIBBON_TITLES = {
-    full: 'Ribbon: Full (Big icons) — Click for Small symbols (Ctrl+F1, Shift+click for rows)',
-    symbols: 'Ribbon: Small symbols — Click for Just text (Ctrl+F1, Shift+click for rows)',
-    text: 'Ribbon: Just text — Click to Hide ribbon (Ctrl+F1, Shift+click for rows)',
-    hidden: 'Ribbon: Hidden — Click to Restore full ribbon (Ctrl+F1, Shift+click for rows)',
-  };
-  const RIBBON_ICONS = {
-    full: 'bi-chevron-bar-up',
-    symbols: 'bi-grid-3x2-gap',
-    text: 'bi-fonts',
-    hidden: 'bi-chevron-down',
-  };
-  const RIBBON_LABELS = {
-    full: 'Minimize',
-    symbols: 'Symbols',
-    text: 'Text',
-    hidden: 'Show ribbon',
-  };
-
-  let ribbonState = (() => {
-    try {
-      const s = localStorage.getItem('cadcraft.ribbon_state');
-      return RIBBON_MODES.includes(s) ? s : 'full';
-    } catch {
-      return 'full';
-    }
-  })();
-
-  const applyRibbonState = (mode) => {
-    if (!RIBBON_MODES.includes(mode)) mode = 'full';
-    ribbonState = mode;
-    root.setAttribute('data-ribbon', mode);
-    try { localStorage.setItem('cadcraft.ribbon_state', mode); } catch {}
-
-    const cycleBtns = document.querySelectorAll('[data-ribbon-cycle]');
-    cycleBtns.forEach((btn) => {
-      btn.title = RIBBON_TITLES[mode];
-      const icon = btn.querySelector('.bi');
-      if (icon) {
-        icon.className = `bi ${RIBBON_ICONS[mode]}`;
-      }
-      const label = btn.querySelector('span:not(.app-bar-btn-label)');
-      if (label) {
-        label.textContent = RIBBON_LABELS[mode];
-      }
-      if (btn.classList.contains('app-bar-btn')) {
-        btn.setAttribute('aria-pressed', String(mode === 'hidden'));
-      }
-    });
-
-    view.resize();
-  };
-
-  const cycleRibbon = () => {
-    const nextIdx = (RIBBON_MODES.indexOf(ribbonState) + 1) % RIBBON_MODES.length;
-    applyRibbonState(RIBBON_MODES[nextIdx]);
-  };
-
-  // ---- ribbon rows / layers: 1 (single row), 2 (two rows), auto (fluid wrap) ----
-  const RIBBON_ROW_OPTIONS = ['1', '2', 'auto'];
-  let ribbonRowsState = (() => {
-    try {
-      const r = localStorage.getItem('cadcraft.ribbon_rows');
-      return RIBBON_ROW_OPTIONS.includes(r) ? r : '1';
-    } catch {
-      return '1';
-    }
-  })();
-
-  function applyRibbonRows(mode) {
-    if (!RIBBON_ROW_OPTIONS.includes(mode)) mode = '1';
-    ribbonRowsState = mode;
-    root.setAttribute('data-ribbon-rows', mode);
-    try { localStorage.setItem('cadcraft.ribbon_rows', mode); } catch {}
-    settingsDlg?.querySelectorAll('input[name="ccRibbonRows"]').forEach((r) => {
-      r.checked = r.value === mode;
-    });
-    view.resize();
-  }
-
-  function cycleRibbonRows() {
-    const nextIdx = (RIBBON_ROW_OPTIONS.indexOf(ribbonRowsState) + 1) % RIBBON_ROW_OPTIONS.length;
-    const nextMode = RIBBON_ROW_OPTIONS[nextIdx];
-    applyRibbonRows(nextMode);
-    const label = nextMode === '1' ? '1 row (scrollable)' : nextMode === '2' ? '2 rows' : 'Auto-wrap';
-    print(`Ribbon rows: ${label}`);
-  }
-
-  document.addEventListener('click', (e) => {
-    const btn = e.target.closest('[data-ribbon-cycle]');
-    if (btn) {
-      e.preventDefault();
-      if (e.shiftKey) {
-        cycleRibbonRows();
-      } else {
-        cycleRibbon();
-      }
-    }
-  });
-
-  window.addEventListener('keydown', (e) => {
-    if (e.key === 'F1' && e.ctrlKey && !e.altKey && !e.metaKey) {
-      e.preventDefault();
-      if (e.shiftKey) {
-        cycleRibbonRows();
-      } else {
-        cycleRibbon();
-      }
-    }
-  });
-
-  host.setRibbon = (mode) => applyRibbonState(mode);
-  host.setRibbonRows = (mode) => applyRibbonRows(mode);
-  host.getRibbonRows = () => ribbonRowsState;
-
-  applyRibbonState(ribbonState);
-  applyRibbonRows(ribbonRowsState);
 
   // toolbar menus (Edit › More): one open at a time, closed by a click elsewhere or Esc
   function closeMenus(except = null) { for (const d of root.querySelectorAll('details.cc-menu[open]')) if (d !== except) d.open = false; }
