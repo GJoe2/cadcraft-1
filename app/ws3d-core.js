@@ -380,6 +380,8 @@ export class Workspace3D {
     let bb = this.model.bbox();
     const l = this.lines().bbox;
     if (l) { bb = bboxAdd(bb, l.min); bb = bboxAdd(bb, l.max); }
+    const c = this.cloudBox?.();   // a point cloud (0.5 SG.1, ws3d.js)
+    if (c) { bb = bboxAdd(bb, c.min); bb = bboxAdd(bb, c.max); }
     return bb;
   }
   /**

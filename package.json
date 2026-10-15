@@ -1,7 +1,7 @@
 {
     "name": "cadcraft",
     "private": true,
-    "description": "CadCraft — 2D drafting & documentation (the CadCraft family)",
+    "description": "CadCraft — 2D drafting & 3D modeling (the CadCraft family)",
     "scripts": {
         "start": "node devshell/serve.mjs",
         "test": "node devshell/test.mjs",

@@ -31,10 +31,11 @@ The whole insert is one step: {{key:Mod+Z}} takes the reference and the copied d
 
 Click {{ui:Library…}} in the {{ui:Blocks}} panel, or {{ui:Library}} in the Blocks group, or type `LIB`. At the `INSERT` prompt, `L` opens it too.
 
-The library has three sources, as tabs:
+The library has four sources, as tabs:
 
 - {{ui:LibraryCraft}}: the CadCraft library. Search by name, maker or model, and filter by category.
 - {{ui:Files…}}: an item file (`item.json`) from any library, or a drawing, spreadsheet or 3D model to make items from: a DWG or DXF (each block becomes an item), a CSV with name and size columns, or a glTF or OBJ model. Nothing is uploaded.
+- {{ui:Standard}}: steel sections (as sections, elevations or 3D members) and standard parts such as bolts, nuts and bearings, made here from published tables. See [Place steel sections and standard parts](topic:steel-and-standard-parts).
 - {{ui:Other feeds}}: other libraries that answer the same way LibraryCraft does. Add their address once; this browser remembers it.
 
 Each card shows a preview, the name, the maker and model, the license and the version. A withdrawn item is marked {{ui:Withdrawn}} with the reason; CadCraft asks before you place one.

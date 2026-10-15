@@ -70,6 +70,10 @@ Safari may show the PDF and wait for you to use **File**, then **Print**.
 
 If your browser blocks the new tab, CadCraft downloads the PDF instead and says so in the history. Allow pop-ups for the site to open it in a tab next time.
 
+## Pictures
+
+Pictures print at their own resolution, under the lines. {{ui:Pictures}} in the dialog caps them at 600, 300 or 150 dpi for a smaller file. Lines, text and hatches always stay sharp (vector), and transparency stays transparency. See [Pictures in a drawing](topic:pictures).
+
 ## Settings that are remembered
 
 The dialog remembers your last paper, orientation, scale, ink and line weight in this browser. A picked window is kept until you reload the page; after that the dialog starts at {{ui:Everything (extents)}}.

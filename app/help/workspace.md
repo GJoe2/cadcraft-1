@@ -29,16 +29,18 @@ Under the app bar is the toolbar. Every button runs a command, exactly as if you
 | Group | Buttons |
 |---|---|
 | File | {{ui:New}}, {{ui:Open}}, {{ui:Save}}, {{ui:Save as}}, {{ui:Plot}} |
-| Draw | {{ui:Line}}, {{ui:Polyline}}, {{ui:Circle}}, {{ui:Arc}}, {{ui:Rectangle}}, {{ui:Polygon}}, {{ui:Ellipse}}, {{ui:Text}}, {{ui:Paragraph}}, {{ui:Hatch}}, {{ui:Point}} |
+| Draw | {{ui:Line}}, {{ui:Polyline}}, {{ui:Circle}}, {{ui:Arc}}, {{ui:Rectangle}}, {{ui:Polygon}}, {{ui:Ellipse}}, {{ui:Text}}, {{ui:Paragraph}}, {{ui:Hatch}}, and {{ui:More}}: {{ui:Point}}, {{ui:Construction line}} and {{ui:Ray}} (see [Construction lines and rays](topic:construction-lines)) |
 | Modify | {{ui:Move}}, {{ui:Copy}}, {{ui:Rotate}}, {{ui:Scale}}, {{ui:Mirror}}, {{ui:Stretch}}, {{ui:Offset}}, {{ui:Trim}}, {{ui:Extend}}, {{ui:Fillet}}, {{ui:Chamfer}}, {{ui:Explode}}, {{ui:Erase}}, and {{ui:More}}: {{ui:Array}}, {{ui:Join}}, {{ui:Match properties}}, {{ui:Break}} and {{ui:Lengthen}} |
 | Annotate | {{ui:Linear}}, {{ui:Aligned}}, {{ui:Angle}}, {{ui:Radius}}, {{ui:Diameter}} (dimensions), {{ui:Leader}} (multileader), and {{ui:More}}: {{ui:Continue dimension}}, {{ui:Baseline dimension}} and {{ui:Revision cloud}} |
 | Parametric | {{ui:Auto}}, {{ui:Constrain}}, {{ui:Dimension}}, {{ui:Parameters}}, and {{ui:More}} with each constraint (see [Constrain a drawing](topic:constraints)) |
 | Blocks | {{ui:Make}}, {{ui:Insert}}, {{ui:Library}}, and {{ui:More}}: {{ui:Edit block}} and {{ui:Define attribute}} |
 | Sheets | {{ui:New sheet}}, {{ui:Viewport}} |
 | Edit | {{ui:Undo}}, {{ui:Redo}}, {{ui:Copy}} (to the clipboard), {{ui:Paste}}, and {{ui:More}}: a menu with {{ui:Cut}}, {{ui:Copy}}, {{ui:Paste}}, {{ui:Paste in place}}, {{ui:Duplicate and move}}, {{ui:Delete}}, {{ui:Select all}}, {{ui:Select none}}, {{ui:Quick select}}, {{ui:Select similar}} and {{ui:Find and replace}}, each with its key |
-| View | {{ui:Extents}}, {{ui:Window}}, {{ui:Previous}}, and {{ui:More}}: {{ui:Measure distance}}, {{ui:Area}}, {{ui:Measure (radius, angle …)}}, and the split screen: {{ui:Split side by side}}, {{ui:Split stacked}}, {{ui:Four panes}}, {{ui:One pane}} (see [Split the screen](topic:split-screen)) |
+| View | {{ui:Extents}}, {{ui:Window}}, {{ui:Previous}}, and {{ui:More}}: {{ui:Measure distance}}, {{ui:Area}}, {{ui:Measure (radius, angle …)}}, and the split screen: {{ui:Split side by side}}, {{ui:Split stacked}}, {{ui:Four panes}}, {{ui:One pane}} (see [Split the screen](topic:split-screen)), and {{ui:Turn view 90° left}}, {{ui:Turn view 90° right}}, {{ui:Back to world}} (see [Turn the view](topic:ucs-and-turned-view)) |
 
 {{ui:Copy}} in the {{ui:Modify}} group is the {{cmd:COPY}} command (base point, then where each copy goes); {{ui:Copy}} in the {{ui:Edit}} group puts objects on the clipboard for {{ui:Paste}}. See [Copy, paste and duplicate](topic:copy-paste). The button of the command that is running stays highlighted until the command ends. Tooltips name the Windows shortcuts ("Ctrl+O"); on a Mac, {{key:Mod+O}} works too.
+
+On a short window (a laptop with its display scaled to 125 % or more, for example) the toolbar never takes the drawing's place: when the drawing would get too little height, the buttons drop the words under their icons and the group names (hover a button for its name), and if that is still not enough the toolbar becomes one row that scrolls sideways. A taller window brings the words back.
 
 ## The left panel
 
@@ -60,7 +62,7 @@ Below the drawing are the tabs: {{ui:Model}} first, then {{ui:3D}}, then one tab
 
 - {{ui:Model}} is the drawing itself, at full size, in drawing units.
 - {{ui:3D}} shows the drawing lying on the ground and the solids made from it. While it shows, the toolbar has a {{ui:3D}} group in place of the drawing groups. See [Model in 3D](topic:3d-solids).
-- Each sheet tab is a sheet of paper with a title block and viewports onto the model. What you draw there is in paper units (millimeters or inches).
+- Each sheet tab is a sheet of paper with a title block and viewports onto the model. What you draw there is in paper units (millimeters or inches). Double-click inside a viewport to work on the model through it (see [Work on the model through a viewport](topic:sheets-and-viewports#work-on-the-model-through-a-viewport)). A long sheet name is cut short on its tab; hover the tab for the whole name. With many sheets, {{ui:Settings}} › {{ui:CadCraft}} › {{ui:Sheet tabs}} › {{ui:Sheet numbers only}} shows just each sheet's number (A-101) on its tab.
 - {{ui:+}} makes a new sheet with a border, a title block and one viewport. It is the same as the {{cmd:LAYOUT}} command.
 - Double-click a sheet tab to rename it. With a tab focused, {{key:Left}} and {{key:Right}} move between tabs.
 

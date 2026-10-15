@@ -46,3 +46,14 @@ Lines that start a program on your computer, like `NOTEPAD, START, 1, *File to e
 ## Reload the file
 
 Type {{cmd:REINIT}} and press {{key:Enter}} to apply your aliases file again. It is kept in this browser; the desktop app will keep it in its own folder, and the cloud service will sync it.
+
+## Keyboard shortcuts for any command
+
+An alias is typed; a shortcut is a key. To give a command a key of your own:
+
+1. Click {{ui:View}} › {{ui:More}} › {{ui:Keyboard shortcuts…}}, or type `KEYS` and press {{key:Enter}}.
+2. Click the {{ui:Key}} box and press the keys, for example {{key:Alt+Shift+C}}.
+3. In {{ui:Runs}}, write the command, and if you like what to type after it: `CIRCLE`, or `ZOOM E`.
+4. Click {{ui:Add}}.
+
+A key needs {{key:Mod}} or {{key:Alt}} with a letter or digit, or a free function key ({{key:F2}}, {{key:F4}}, {{key:F5}}, {{key:F6}}, {{key:F9}}). Keys CadCraft, the app or the browser already use, and keys a My tools button has (see [Buttons of your own](topic:my-tools)), are refused, and the box says why. Shortcuts are kept in this browser (or desktop app); {{ui:Remove}} takes one away.

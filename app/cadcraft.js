@@ -30,11 +30,21 @@
 
 import { Doc, TYPE_NAMES, aciHex } from './doc.js';
 import { View, SNAP_LABELS, DRAWING_FONT } from './view.js';
-import { Engine, lookup, commandList, namedBlocks, setLengthFormat, lengthFormatLabel, lengthFormatName, qsTypeLabel, qsPropLabel, closeBlockEdit, isAttdefText } from './commands.js';
+import { switchState } from './visedit.js';
+import { Engine, lookup, commandList, namedBlocks, setLengthFormat, lengthFormatLabel, lengthFormatName, qsTypeLabel, qsPropLabel, closeBlockEdit, isAttdefText, commandRegistry } from './commands.js';
 import { QS_PROPS, propsFor, valuesOf, quickSelect as qsCount } from './qselect.js';
 import { formatLength, formatArea, parseLength, unitsOf, LUNITS } from './units.js';
 import { PATTERNS, hatchLines } from './hatch.js';
 import { polarTrack, trackPoint } from './tracking.js';
+import { activeUcs, toUcs } from './ucs.js';
+import { installMyTools } from './mytools-ui.js';
+import { visibilityOf, setVisibility } from './dyn-blocks.js';
+import { dynGripActs } from './dyngrips.js';
+import { sheetNumberOf } from './sheetnum.js';
+import { openCompare } from './compare-ui.js';
+import { installShortcuts } from './keys-ui.js';
+import { keyMap } from './mytools.js';
+import { has as hasKey } from './i18n.js';
 import { DynInput } from './dynin.js';
 import { readDxf, writeDxf } from './dxf.js';
 import { saveDwg, DWG_VERSIONS, dwgVersionKey } from './dwg-save.js';
@@ -67,6 +77,12 @@ import { installLispUi } from './appload.js';
 import { startAddons } from './addons/cadcraft-api.js';
 import { installAgents } from './agents.js';
 import { getHost } from "./host.js";
+import './pictures-cmd.js';   // IMAGEATTACH, IMAGE, IMAGECLIP (0.5 WL.14, cad-files)
+import { CloudAttach, attachFile } from './cloud-cad.js';
+import { installMaps } from './maps-cad.js';   // MAPLAYERS (0.5 SG.3; maplayers.js loads on first use)   // POINTCLOUDATTACH, POINTCLOUD (0.5 SG.1; the reader loads with the first cloud)
+import './textmask-cmd.js';   // TEXTMASK (0.5 WL.8, cad-files)
+import './xclip-cmd.js';   // XCLIP (0.5 WL.16, cad-files)
+import { panButton, wheelFactor } from './input-mouse.js';   // 0.5 IP.3: the menu style's wheel and pan buttons (input-cadcraft.js)
 
 const root = document.querySelector('[data-cadcraft]');
 /** The library needs getcadcraft.com's API: off in the self-hosted browser edition (devshell `#cc-edition` {library: false}). */
@@ -97,6 +113,7 @@ function init(root) {
     pick: saved.pick === 'replace' ? 'replace' : 'add',
     lasso: saved.lasso === 'box' ? 'box' : 'lasso',   // press and drag: a lasso (lasso.js; LASSOMODE 1) or a rectangle (0)
     corner: ['auto', 'cube', 'axes', 'none'].includes(saved.corner) ? saved.corner : 'auto',   // corner indicator (applyCorner)
+    tabs: saved.tabs === 'number' ? 'number' : 'full',   // sheet tabs: full names, or sheet numbers only (WL.9)
   };
   const persist = () => { try { localStorage.setItem('cadcraft.settings', JSON.stringify({ ...settings, kinds: [...settings.kinds] })); } catch { /* private window: fine */ } };
 
@@ -113,7 +130,7 @@ function init(root) {
     settingsDlg?.querySelectorAll('input[name="ccCursor"]').forEach((r) => { r.checked = r.value === size; });
   };
   // Paste point and what a click does to the selection: two radio groups in the same panel.
-  const RADIO_SETTINGS = { ccPaste: 'pasteBase', ccPick: 'pick', ccCorner: 'corner', ccLasso: 'lasso' };
+  const RADIO_SETTINGS = { ccPaste: 'pasteBase', ccPick: 'pick', ccCorner: 'corner', ccLasso: 'lasso', ccTabs: 'tabs' };
   const setRadio = (name, value) => {
     settings[RADIO_SETTINGS[name]] = value; persist();
     settingsDlg?.querySelectorAll('input[name="' + name + '"]').forEach((r) => { r.checked = r.value === value; });
@@ -125,8 +142,9 @@ function init(root) {
       if (e.target.name === 'ccCursor') setCursor(e.target.value);
       else if (RADIO_SETTINGS[e.target.name]) setRadio(e.target.name, e.target.value);
       if (e.target.name === 'ccCorner') applyCorner();
+      if (e.target.name === 'ccTabs') renderTabs();
     });
-    settingsDlg.addEventListener('cc-settings-reset', () => { setCursor('medium'); setRadio('ccPaste', 'lower-left'); setRadio('ccPick', 'add'); setRadio('ccCorner', 'auto'); setRadio('ccLasso', 'lasso'); applyCorner(); });
+    settingsDlg.addEventListener('cc-settings-reset', () => { setCursor('medium'); setRadio('ccPaste', 'lower-left'); setRadio('ccPick', 'add'); setRadio('ccCorner', 'auto'); setRadio('ccLasso', 'lasso'); setRadio('ccTabs', 'full'); applyCorner(); renderTabs(); });
   }
 
   // The clipboard: this tab's copy + localStorage, so another tab can paste (storage may be off: memory only).
@@ -139,7 +157,7 @@ function init(root) {
     cursor: null, selection: new Set(), shift: false,
     clipboard, settings,
     print, prompt: setPrompt,
-    setSelection(set) { host.selection = new Set(set); view.state.selection = host.selection; refreshGrips(); scheduleProps(); view.invalidate(); },
+    setSelection(set) { host.selection = new Set(set); view.state.selection = host.selection; refreshGrips(); scheduleProps(); view.invalidate(); layersForViewport(); },
     pickAt: (p) => cycledAt(p) ?? view.pick(p),   // Tab cycling (cycleTab) wins while the pointer stays put
     pickWindow: (w, crossing) => view.pickWindow(w, crossing),
     pickLasso: (pts, mode) => lassoHits(doc.all().filter((e) => doc.editable(e)), pts, mode, doc.blocks, (e) => view.boundsOf(e)),
@@ -148,12 +166,14 @@ function init(root) {
     quickSelect: (o) => quickSelectDialog(o),   // QSELECT
     findDialog: (o) => findDialog(o),   // FIND
     onBlockEdit: (be) => showBlockEdit(be),   // BEDIT / BCLOSE: the banner
+    pickRadius: () => view.cursorSpec().pick / (view.zoom || 1),   // the pick tolerance in drawing units (BVSHOW, DB.9)
     cancelEdit: () => { if (!cancelEdit) return false; cancelEdit(); return true; },
     boundsOf: (e) => view.boundsOf(e),
     preview(ents) { view.state.preview = ents || []; view.invalidate(); },
     saveSettings: () => persist(),
     setToggle(name, on) { if (name in toggles && !!settings[name] !== !!on) toggle(name); },   // LWDISPLAY
     onCommand(name) {
+      if (name && !['UNDO', 'U', 'REDO', 'MREDO'].includes(name)) commitViewport();   // VP.4: the viewport's new view is its own undo step
       if (!name) { acquired.length = 0; view.state.track = null; }   // tracking points last one command
       for (const b of root.querySelectorAll('[data-cmd]:not([role="menuitem"])')) b.setAttribute('aria-pressed', String(!!name && lookup(b.dataset.cmd.split(' ')[0])?.name === name));
       if (name) hideHint();
@@ -161,7 +181,11 @@ function init(root) {
       scheduleProps();
     },
     zoomExtents: () => { rememberView(); view.fit(); },
-    zoomWindow: (a, b, o = {}) => { rememberView(); view.fit({ minX: Math.min(a.x, b.x), minY: Math.min(a.y, b.y), maxX: Math.max(a.x, b.x), maxY: Math.max(a.y, b.y) }, o.exact ? 1 : 0.9); },
+    // point clouds (cloud-cad.js, 0.5 SG.1): one per window, under whichever drawing shows
+    pickCloud: () => new Promise((resolve) => { const i = el('input', { type: 'file', accept: '.las,.laz,.xyz,.pts' }); i.addEventListener('change', () => resolve(i.files[0] || null)); i.addEventListener('cancel', () => resolve(null)); i.click(); }),
+    zoomCloud: () => { const b = host.cloud.bbox(); if (b) { rememberView(); view.fitPoints([{ x: b.minX, y: b.minY }, { x: b.maxX, y: b.maxY }]); } },
+    status: (msg) => busy(msg),
+    zoomWindow: (a, b, o = {}) => { rememberView(); view.fitPoints([a, b], o.exact ? 1 : 0.9); },   // in a turned view: the window as it lies on screen
     zoomPrevious: () => zoomPrevious(),
     zoomBy: (f) => { rememberView(); view.zoomAt(view.w / 2, view.h / 2, f); },
     viewRect: () => view.viewRect(),
@@ -170,6 +194,9 @@ function init(root) {
     plot: (c) => plotDialog(c),
     // INSERT, option File: another drawing, read here; then the whole drawing or one of its blocks
     pickDrawing: () => pickDrawing(),
+    // pictures (pictures-cmd.js): PNG / JPEG files → [{ name, bytes }]; redraw once their files are given
+    pickPictures: ({ multiple = false } = {}) => pickPictures(multiple),
+    redraw: () => view.invalidate(true),
     chooseBlock: (fileName, names) => chooseBlock(fileName, names),
     choose: (o) => ask(o),
     // INSERT, option Library; LIBRARY; the Blocks panel's "Library…"
@@ -186,8 +213,15 @@ function init(root) {
     plotPrefs: () => ({ ink: plotPrefs.ink || 'mono', pen: +(plotPrefs.pen || 0.25) }),   // PUBLISH plots as the Plot dialog last did
     render3dTabs: () => renderTabs(),
   };
+  host.cloud = new CloudAttach({ doc: () => doc, redraw: () => view.invalidate(true), on3d: () => host.ws3d?.cloudChanged?.() });
+  // under the drawing: map layers (maps-cad.js), then a point cloud
+  const maps = installMaps({ root, attrib: root.querySelector('.cc-canvases'), view, doc, say: print, busy, ask, refocus: () => focusCommandLine() });
+  host.maps = maps;
+  view.underlay = (ctx, T, v) => { maps.paint(ctx, T, v); host.cloud.draw(ctx, T, v); };
+  view.underlayKey = () => host.cloud.version + '|' + maps.key();
+  view.snapExtra = (p, r) => host.cloud.snap(p, r);
   const engine = new Engine(doc, host);
-  window.cadcraft = { doc, view, engine, host };
+  window.cadcraft = { doc, view, engine, host, commands: commandRegistry };   // commands: Studio Live's LIVELOCK (live.js)
 
   // ---- history and prompt ----
   function print(s) {
@@ -212,7 +246,7 @@ function init(root) {
   const dynBox = el('div', { className: 'cc-dyn', hidden: true, 'aria-hidden': 'true' });
   ui.stage.append(dynBox);
   /** The pointer with the locked fields applied. */
-  const dynPoint = (p) => (dyn.on ? dyn.apply(p, engine.base, parseL, ui.input.value) : p);
+  const dynPoint = (p) => { dyn.ucs = activeUcs(doc); return dyn.on ? dyn.apply(p, engine.base, parseL, ui.input.value) : p; };
   function renderDyn() {
     const w = engine.waiting, cur = host.cursor;
     const show = settings.dyn && w && cur && view.state.cursor && ['point', 'distance', 'angle'].includes(w.kind);
@@ -226,6 +260,7 @@ function init(root) {
     };
     const parts = [el('span', { className: 'cc-dyn-p' }, w.prompt)];
     if (dyn.on) {
+      dyn.ucs = activeUcs(doc);
       const [a, b] = dyn.live(cur, engine.base);
       parts.push(field(0, a, false), field(1, b, dyn.mode === 'polar'));
     } else if (w.kind === 'distance' && w.opts.base) parts.push(el('span', { className: 'cc-dyn-f is-active' }, typedNow || fmtL(Math.hypot(cur.x - w.opts.base.x, cur.y - w.opts.base.y))));
@@ -263,7 +298,7 @@ function init(root) {
   ui.input.addEventListener('input', () => { suggest(); if (dyn.on) refreshCursor(); else renderDyn(); });
 
   function submit() {
-    if (dyn.on) { const s = dyn.commit(ui.input.value, host.cursor, engine.base, { last: engine.lastPoint, parseLen: parseL }); if (s) ui.input.value = s; }
+    if (dyn.on) { dyn.ucs = activeUcs(doc); const s = dyn.commit(ui.input.value, host.cursor, engine.base, { last: engine.lastPoint, parseLen: parseL }); if (s) ui.input.value = s; }
     const v = ui.input.value;
     ui.input.value = '';
     suggest();
@@ -295,8 +330,12 @@ function init(root) {
       ui.input.focus({ preventScroll: true });
       await engine.run(cmd);
     });
-    // a command with an option (ZOOM E): feed the option once the prompt is up
-    if (b.dataset.cmd.includes(' ')) b.addEventListener('click', () => { setTimeout(() => { if (engine.waiting) engine.text(b.dataset.cmd.split(' ')[1]); }, 0); });
+    // a command with options (ZOOM E, UCS Z -90): feed them one by one, each once its prompt is up
+    if (b.dataset.cmd.includes(' ')) b.addEventListener('click', () => {
+      const rest = b.dataset.cmd.split(' ').slice(1);
+      const feed = () => { if (!rest.length || !engine.waiting) return; engine.text(rest.shift()); setTimeout(feed, 0); };
+      setTimeout(feed, 0);
+    });
   }
 
   // toolbar menus (Edit › More): one open at a time, closed by a click elsewhere or Esc
@@ -375,6 +414,7 @@ function init(root) {
   let panning = null;      // { x, y }
   let pendingBox = null;   // first corner of a click-click window (world)
   let gripEdit = null;     // { id, key, from }
+  let vpCtxKey = '';       // what the Layers panel's freeze-in-viewport column last showed (VP.2)
   let lastRaw = null;
   let cycle = null;        // Tab cycling: { at (world), ids, i } (cycleTab)
   let drag = null;         // press and drag: { kind 'lasso' | 'path' (TRIM / EXTEND), start (screen), pts (world), mode } (lasso.js)
@@ -494,6 +534,30 @@ function init(root) {
     return row;
   })();
 
+  // ---- short windows (0.5 VP.5): the toolbar never takes the drawing's place. A laptop at 125–175 % (1366 × 768 at
+  // 150 % is 911 × 512 CSS px) wrapped the toolbar into four or five rows, the drawing got no height, and the Model /
+  // sheet tabs ended up under the toolbar where no click reached them. When the drawing is shorter than 10rem or 30 %
+  // of the app, the toolbar first drops its words and group names (tooltips and screen readers keep them) and the
+  // history shows two lines, then it becomes one row that scrolls sideways, as on a phone. The staff tab is lifted
+  // clear of the sheet tabs (--cc-sp-bottom). Runs on the next frame after any size change (never inside the
+  // ResizeObserver callback). ----
+  const FIT = ['cc-fit-compact', 'cc-fit-row', 'cc-fit-tight'];   // tight (0.5 VP.5): short windows with a bottom-docked panel and the touch key row
+  let fitFrame = 0;
+  function fitBars() {
+    fitFrame = 0;
+    const narrow = window.matchMedia('(max-width: 760px)').matches;   // i18n-ignore (a media query; the phone layout scrolls)
+    const rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+    const enough = () => ui.stage.clientHeight >= Math.max(10 * rem, root.clientHeight * 0.3);
+    root.classList.remove(...FIT);
+    if (!narrow) for (const c of FIT) { if (enough()) break; root.classList.add(c); }
+    const r = ui.stage.getBoundingClientRect(), tabsH = root.querySelector('.cc-tabs')?.offsetHeight || 0;
+    document.body.style.setProperty('--cc-sp-bottom', Math.max(8, Math.round(window.innerHeight - r.bottom + tabsH + 8)) + 'px');
+  }
+  const fitSoon = () => { if (!fitFrame) fitFrame = requestAnimationFrame(fitBars); };
+  if (typeof ResizeObserver === 'function') { const ro = new ResizeObserver(fitSoon); ro.observe(root); ro.observe(ui.stage); }
+  window.addEventListener('resize', fitSoon);
+  fitSoon();
+
   // pointer positions are local to the active pane (view.js coordinates); stagePos is over all the canvases (split screen)
   const stagePos = (e) => { const r = ui.over.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
   const pos = (e) => { const s = stagePos(e); return { x: s.x - view.x0, y: s.y - view.y0 }; };
@@ -507,11 +571,12 @@ function init(root) {
   ui.over.addEventListener('contextmenu', (e) => e.preventDefault());
   ui.over.addEventListener('pointerdown', (e) => {
     if (e.pointerType === 'touch' && touchDown(e)) return;   // a second finger: pinch and pan (S.8)
-    ui.over.setPointerCapture(e.pointerId);
+    try { ui.over.setPointerCapture(e.pointerId); } catch { /* a synthetic or already-lifted pointer: nothing to capture */ }
     if (paneFromEvent(e) && e.button === 0) { down = null; return; }   // the first click into another pane only makes it active (as AutoCAD)
     const p = pos(e);
     host.shift = e.shiftKey;
-    if (e.button === 1) { e.preventDefault(); rememberView('pan'); panning = p; ui.over.classList.add('is-panning'); return; }
+    if (e.button === 1) { e.preventDefault(); if (!panButton(1)) { down = null; return; } rememberView('pan'); panning = p; ui.over.classList.add('is-panning'); return; }   // IP.3: unless the style took middle-pan away
+    if (view.entered && e.button === 0 && !view.insideEntered(p.x, p.y)) { down = null; return; }   // outside the entered viewport: only a double-click (leave) acts
     down = { ...p, button: e.button, world: view.toWorld(p.x, p.y), moved: false };
   });
   ui.over.addEventListener('pointermove', (e) => {
@@ -524,11 +589,12 @@ function init(root) {
     else if (down && !down.moved && Math.hypot(p.x - down.x, p.y - down.y) > (e.pointerType === 'touch' ? 10 : 4)) {   // a finger wobbles more
       down.moved = true;
       clearTimeout(longPress);
-      if (down.button === 2) { rememberView('pan'); panning = p; ui.over.classList.add('is-panning'); }
+      if (down.button === 2) { if (panButton(2)) { rememberView('pan'); panning = p; ui.over.classList.add('is-panning'); } }   // IP.3: right-drag pans only where the style says so
       else if (down.button === 0 && engine.expects === 'entity' && engine.waiting?.opts.path && !gripEdit) startDrag('path', p);   // TRIM / EXTEND: a freehand path
       else if (down.button === 0 && canSelectNow() && !gripEdit && !pendingBox) {
         const g = gripAt(down);
-        if (g) gripEdit = { id: g.id, key: g.key, from: { x: g.x, y: g.y } };
+        if (g && g.shape) { down = null; onDynGrip(g); }   // a dynamic block's grip: no drag of its own yet (DB.5)
+        else if (g) gripEdit = { id: g.id, key: g.key, from: { x: g.x, y: g.y } };
         else if (settings.lasso !== 'box') startDrag('lasso', p);
         else view.state.box = { a: down.world, b: down.world };
       }
@@ -558,15 +624,18 @@ function init(root) {
     const p = pos(e);
     const step = e.deltaMode === 1 ? e.deltaY * 33 : e.deltaY;
     rememberView('wheel');
-    view.zoomAt(p.x, p.y, Math.pow(1.0018, -step));
+    view.zoomAt(p.x, p.y, Math.pow(1.0018, -step * (e.ctrlKey ? 1 : wheelFactor())));   // IP.3: the style's wheel (a pinch stays as it is)
     if (lastRaw) moveCursor(view.toWorld(p.x, p.y));
   }, { passive: false });
   ui.over.addEventListener('auxclick', (e) => { if (e.button === 1 && e.detail === 2) { rememberView(); view.fit(); } });
   ui.over.addEventListener('dblclick', (e) => {
     if (engine.busy) return;
+    const lp = pos(e);
+    if (view.entered && !view.insideEntered(lp.x, lp.y)) { leaveViewport(); return; }   // VP.4: double-click outside = back to the sheet
     if (params.dblclick(view.toWorld(pos(e).x, pos(e).y))) return;   // a dimensional constraint's label: its value
     const id = view.pick(view.toWorld(pos(e).x, pos(e).y));
     if (id && ['text', 'mleader'].includes(doc.get(id)?.type)) { host.setSelection(new Set([id])); engine.run('TEXTEDIT'); }   // edit it in place
+    else if (!view.entered && doc.layout && viewportAt(view.toWorld(lp.x, lp.y))) enterViewport(viewportAt(view.toWorld(lp.x, lp.y)));   // VP.4: inside a viewport = edit the model through it
     else if (id) { host.setSelection(new Set([id])); props.open(); }   // any other object: its properties (props.js)
   });
 
@@ -652,24 +721,26 @@ function init(root) {
     if (settings.osnap && !host.shift) {
       const s = view.snap(raw, { kinds: settings.kinds, base });
       view.state.snap = s;
-      if (s) { watchAcquire(s); return { x: s.x, y: s.y }; }
+      if (s) { watchAcquire(s); return s.defer ? { x: s.x, y: s.y, tan: { c: s.defer, near: { x: raw.x, y: raw.y } } } : { x: s.x, y: s.y }; }   // a deferred tangent travels with the point (DR.3)
     } else view.state.snap = null;
     watchAcquire(null);
     const tol = 8 / view.zoom;
     if (settings.otrack && settings.osnap && !host.shift && acquired.length) {
-      const r = trackPoint(acquired, raw, { inc: settings.polarInc, tol, base, polarAll: settings.polar });
+      const r = trackPoint(acquired, raw, { inc: settings.polarInc, tol, base, polarAll: settings.polar, start: activeUcs(doc)?.ang || 0 });
       if (r) {
         const from = r.rays[0].from;
-        view.state.track = { rays: r.rays, acquired, label: r.kind === 'two' ? t('track.two') : t('track.one', { d: fmtL(Math.hypot(r.x - from.x, r.y - from.y)), ang: fmt(deg(r.rays[0].ang)) }) };
+        view.state.track = { rays: r.rays, acquired, label: r.kind === 'two' ? t('track.two') : t('track.one', { d: fmtL(Math.hypot(r.x - from.x, r.y - from.y)), ang: fmt(deg(normAngle(r.rays[0].ang - (activeUcs(doc)?.ang || 0)))) }) };
         return { x: r.x, y: r.y };
       }
     }
+    const ua = activeUcs(doc)?.ang || 0;   // polar rays and ortho follow the UCS (DR.8)
     if (settings.polar && base && !host.shift) {
-      const r = polarTrack(base, raw, { inc: settings.polarInc, tol });
-      if (r) { view.state.track = { rays: [r.ray], acquired, label: t('track.polar', { d: fmtL(r.d), ang: fmt(deg(r.ang)) }) }; return { x: r.x, y: r.y }; }
+      const r = polarTrack(base, raw, { inc: settings.polarInc, tol, start: ua });
+      if (r) { view.state.track = { rays: [r.ray], acquired, label: t('track.polar', { d: fmtL(r.d), ang: fmt(deg(normAngle(r.ang - ua))) }) }; return { x: r.x, y: r.y }; }
     }
     if (settings.ortho && base) {
-      return Math.abs(raw.x - base.x) >= Math.abs(raw.y - base.y) ? { x: raw.x, y: base.y } : { x: base.x, y: raw.y };
+      const c = Math.cos(ua), s = Math.sin(ua), dx = raw.x - base.x, dy = raw.y - base.y, u = c * dx + s * dy, v = -s * dx + c * dy;
+      return Math.abs(u) >= Math.abs(v) ? { x: base.x + c * u, y: base.y + s * u } : { x: base.x - s * v, y: base.y + c * v };
     }
     return raw;
   }
@@ -704,7 +775,8 @@ function init(root) {
       view.state.preview = e ? [gripMove(e, gripEdit.key, p)] : [];
     } else if (engine.busy) view.state.preview = engine.preview(p);
     const base = gripEdit ? gripEdit.from : engine.base;
-    ui.coords.textContent = fmtL(p.x) + ', ' + fmtL(p.y) + (base ? '   Δ ' + fmtL(Math.hypot(p.x - base.x, p.y - base.y)) + ' < ' + fmt(deg(normAngle(Math.atan2(p.y - base.y, p.x - base.x)))) + '°' : '');
+    const uc = activeUcs(doc), q = toUcs(uc, p);   // the readout is in the UCS (DR.8)
+    ui.coords.textContent = fmtL(q.x) + ', ' + fmtL(q.y) + (base ? '   Δ ' + fmtL(Math.hypot(p.x - base.x, p.y - base.y)) + ' < ' + fmt(deg(normAngle(Math.atan2(p.y - base.y, p.x - base.x) - (uc?.ang || 0)))) + '°' : '');
     renderDyn();
     view.invalidate();
   }
@@ -748,6 +820,7 @@ function init(root) {
     if (engine.busy) return;
     // idle: grips, picking, windows
     const g = gripAt(view.toScreen(raw.x, raw.y));
+    if (g && g.shape) { onDynGrip(g); return; }   // a dynamic block's grip (DB.5)
     if (g) { gripEdit = { id: g.id, key: g.key, from: { x: g.x, y: g.y } }; view.state.hotGrip = g; updateCursorMode(); status(t('app.click_where_grip_goes')); refreshCursor(); return; }
     if (params.click(raw)) return;   // a constraint glyph or label (params-panel.js)
     const id = host.pickAt(raw);
@@ -769,6 +842,19 @@ function init(root) {
     if (Math.hypot(sa.x - sb.x, sa.y - sb.y) < 3) { view.invalidate(); return; }
     const rect = { minX: Math.min(a.x, b.x), minY: Math.min(a.y, b.y), maxX: Math.max(a.x, b.x), maxY: Math.max(a.y, b.y) };
     const crossing = sb.x < sa.x;
+    if (view.tw) {   // a turned view (DR.8): the window dragged on screen is a turned rectangle in the drawing — select by its outline
+      const poly = [[sa.x, sa.y], [sb.x, sa.y], [sb.x, sb.y], [sa.x, sb.y]].map(([x, y]) => view.toWorld(x, y));
+      const mode = crossing ? 'crossing' : 'window';
+      if (engine.expects === 'select') engine.lasso(poly, mode);
+      else if (!engine.busy) {
+        const replace = settings.pick === 'replace';
+        const s = replace && !host.shift ? new Set() : new Set(host.selection);
+        for (const id of host.pickLasso(poly, mode)) { if (host.shift && !replace) s.delete(id); else s.add(id); }
+        host.setSelection(s);
+      }
+      view.invalidate();
+      return;
+    }
     if (engine.expects === 'select') engine.window(rect, crossing);
     else if (!engine.busy) {
       const replace = settings.pick === 'replace';
@@ -778,6 +864,36 @@ function init(root) {
     }
     view.invalidate();
   }
+  // ---- a dynamic block's grips (0.5 DB.5; dyngrips.js): the visibility grip opens the list of states; the others show where
+  // their parameters are, and say they don't act yet ----
+  let dynMenu = null;
+  function closeDynMenu() { if (dynMenu) { dynMenu.remove(); dynMenu = null; } }
+  function onDynGrip(g) {
+    if (!dynGripActs(g.key)) { status(t('dyn.grip.not_yet', { name: g.name || g.kind })); return; }
+    const e = doc.get(g.id), info = e && visibilityOf(doc, e);
+    if (!info) return;
+    closeDynMenu();
+    const s = view.toScreen(g.x, g.y), cr = ui.over.getBoundingClientRect(), sr = ui.stage.getBoundingClientRect();
+    dynMenu = el('div', { className: 'cc-menu-list cc-dynvis', role: 'menu', 'aria-label': info.label },
+      ...info.states.map((n) => {
+        const b = el('button', { type: 'button', role: 'menuitemradio', 'aria-checked': String(n === info.current) }, n);
+        b.addEventListener('click', () => {
+          closeDynMenu();
+          const r = n === info.current ? { ok: true } : setVisibility(doc, g.id, n);
+          if (!r.ok) status(t('props.dyn.err.' + r.error));
+          refreshGrips(); scheduleProps(); view.invalidate(); focusCommandLine();
+        });
+        return b;
+      }));
+    dynMenu.style.left = Math.round(cr.left - sr.left + view.x0 + s.x + 10) + 'px';
+    dynMenu.style.top = Math.round(cr.top - sr.top + view.y0 + s.y + 10) + 'px';
+    dynMenu.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') { ev.stopPropagation(); closeDynMenu(); focusCommandLine(); } });
+    ui.stage.append(dynMenu);
+    dynMenu.querySelector('[aria-checked="true"]')?.focus() || dynMenu.querySelector('button')?.focus();
+    setTimeout(() => document.addEventListener('pointerdown', (ev) => { if (dynMenu && !dynMenu.contains(ev.target)) closeDynMenu(); }, { once: true }), 0);
+  }
+  host.dynGrip = (g) => onDynGrip(g);
+
   function commitGrip(p) {
     const g = gripEdit; gripEdit = null; view.state.hotGrip = null; view.state.preview = [];
     const e = doc.get(g.id);
@@ -863,7 +979,29 @@ function init(root) {
   // ---- layers panel ----
   const ACI_NAMES = { 1: t('app.aci.red'), 2: t('app.aci.yellow'), 3: t('app.aci.green'), 4: t('app.aci.cyan'), 5: t('app.aci.blue'), 6: t('app.aci.magenta'), 7: t('app.ink_black_white'), 8: t('app.aci.gray'), 9: t('app.light_gray') };
   const swatch = (c) => (typeof c === 'string' ? c : aciHex(c) === 'ink' ? view.colors.ink : aciHex(c));
+  /** The viewport the Layers panel's "freeze in this viewport" column works on (0.5 VP.2): the one entered, else the one selected on the open sheet. */
+  function viewportContext() {
+    const ev = view.enteredViewport?.();
+    if (ev) return { vp: ev.vp, map: ev.lay.entities };
+    if (!doc.layout || host.selection.size !== 1) return null;
+    const e = doc.get([...host.selection][0]);
+    return e?.type === 'viewport' ? { vp: e, map: doc.entities } : null;
+  }
+  const frozenHere = (vp, name) => (vp.frz || []).some((n) => n.toUpperCase() === String(name).toUpperCase());
+  function toggleVpFreeze(ctx, name) {
+    const vp = ctx.map.get(ctx.vp.id);
+    if (!vp) return;
+    const on = frozenHere(vp, name);
+    const frz = on ? (vp.frz || []).filter((n) => n.toUpperCase() !== name.toUpperCase()) : [...(vp.frz || []), name];
+    doc.change(t(on ? 'vp.frz.thaw.undo' : 'vp.frz.freeze.undo'), () => doc.update(vp.id, { ...vp, frz }, ctx.map));
+    status(t(on ? 'vp.frz.thawed' : 'vp.frz.frozen', { name }));
+  }
+  /** Re-draw the Layers panel when what the freeze-in-viewport column works on changes (selection, entering, an edit). */
+  function layersForViewport() { const c = viewportContext(); const k = c ? c.vp.id + ':' + (c.vp.frz || []).join('\n') : ''; if (k !== vpCtxKey) renderLayers(); }
   function renderLayers() {
+    const vctx = viewportContext();
+    vpCtxKey = vctx ? vctx.vp.id + ':' + (vctx.vp.frz || []).join('\n') : '';
+    root.querySelector('[data-vpfrz-note]')?.toggleAttribute('hidden', !vctx);
     const list = [...doc.layers.values()].sort((a, b) => (a.name === '0' ? -1 : b.name === '0' ? 1 : a.name.localeCompare(b.name, undefined, { numeric: true })));
     ui.layers.replaceChildren(...list.map((l) => {
       const cur = doc.current.layer === l.name;
@@ -885,7 +1023,13 @@ function init(root) {
           flag('on', !l.on, 'eye-slash', 'eye', l.on ? t('app.turn_off') : t('app.turn_on')),
           flag('frozen', l.frozen, 'snow', 'snow', l.frozen ? t('app.layer.thaw') : t('app.layer.freeze')),
           flag('locked', l.locked, 'lock', 'unlock', l.locked ? t('app.layer.unlock') : t('app.layer.lock')),
-          flag('plot', l.plot === false, 'printer', 'printer', l.plot === false ? t('app.plot_layer') : t('app.do_not_plot_layer'))),
+          flag('plot', l.plot === false, 'printer', 'printer', l.plot === false ? t('app.plot_layer') : t('app.do_not_plot_layer')),
+          ...(vctx ? [(() => {   // VP.2: frozen in this viewport only
+            const on = frozenHere(vctx.vp, l.name), label = t(on ? 'vp.frz.thaw' : 'vp.frz.freeze');
+            const b = el('button', { type: 'button', className: 'cc-flag cc-flag-vp', 'aria-pressed': String(on), title: label, 'aria-label': t('app.layer.flag', { label, name: l.name }), dataset: { vpfrz: l.name } }, el('i', { className: 'bi bi-' + (on ? 'snow2' : 'window'), 'aria-hidden': 'true' }));   // i18n-ignore: icon class
+            b.addEventListener('click', () => toggleVpFreeze(vctx, l.name));
+            return b;
+          })()] : [])),
       );
       return li;
     }));
@@ -950,7 +1094,6 @@ function init(root) {
     const skipped = Object.entries(r.skipped || {});
     if (skipped.length) items.push(t('app.report.not_shown', { list: skipped.map(([k, v]) => num(v) + ' ' + k.toLowerCase()).join(', ') }));
     if (r.layouts) items.push(t('app.report.layouts', { n: r.layouts, count: num(r.layouts) }));
-    if (r.twisted) items.push(t('app.report.twisted', { n: r.twisted, count: num(r.twisted) }));
     for (const n of r.notes || []) items.push(n);
     if (items.length) ui.report.append(el('div', { className: 'cc-report' }, el('p', {}, t('app.about_file')), el('ul', {}, ...items.map((t) => el('li', {}, t)))));
   }
@@ -974,6 +1117,7 @@ function init(root) {
     scheduleProps();
     renderInfo();
     if (doc.count()) hideHint();
+    layersForViewport();
   });
 
   function hideHint() { ui.hint.hidden = true; }
@@ -996,6 +1140,7 @@ function init(root) {
   view.onPanes = () => dividers.render();
   /** Make pane i the active one: the command line, Properties and the tabs follow it. → true when it changed. */
   function switchPane(i) {
+    if (view.entered && i !== view.panes?.active) leaveViewport();   // VP.4: another pane = back to the sheet first
     const p = view.panes?.list[i];
     if (p && p.docId != null && p.docId !== tabs.active) {
       // a pane showing another open drawing (Tile): that drawing opens, the pane keeps its view
@@ -1037,13 +1182,83 @@ function init(root) {
   });
   host.tabs = tabs;
 
+  // ---- a viewport entered (0.5 VP.4; view.js keeps the state): MSPACE / double-click inside → edit the model through
+  // it; PSPACE / double-click outside / any tab → back to the sheet. Pan and zoom inside a viewport that isn't locked
+  // change its view, written as one undo step before the next command and on leaving (commitViewport). ----
+  /** The viewport of the open sheet whose frame holds paper point p (topmost first; turned-off ones too). */
+  function viewportAt(p) {
+    const vps = [...doc.entities.values()].filter((e) => e.type === 'viewport' && Math.abs(p.x - e.x) <= e.w / 2 && Math.abs(p.y - e.y) <= e.h / 2);
+    return vps.length ? vps[vps.length - 1] : null;
+  }
+  function enterViewport(vp) {
+    if (!vp || view.entered || !doc.layout) return false;
+    if (vp.on === false) { print(t('vp.enter.off')); return false; }
+    host.setSelection(new Set());
+    if (!view.enterViewport(vp)) return false;
+    renderTabs(); applyCorner(); refreshGrips(); scheduleProps();
+    print(t(vp.locked ? 'vp.enter.locked' : 'vp.enter.done'));
+    root.classList.add('is-in-viewport');
+    renderLayers();
+    return true;
+  }
+  function commitViewport() {
+    const v = view.pendingViewport();
+    if (!v) return;
+    doc.change(t('vp.view.undo'), () => doc.update(v.vp.id, { ...v.vp, cx: v.cx, cy: v.cy, s: v.s }, v.lay.entities));
+    view.entered.base = { cx: v.cx, cy: v.cy, s: v.s };
+  }
+  function leaveViewport({ command = false } = {}) {
+    if (!view.entered) return false;
+    if (engine.busy && !command) engine.escape();
+    commitViewport();
+    host.setSelection(new Set());
+    view.leaveViewport();
+    root.classList.remove('is-in-viewport');
+    renderLayers();
+    renderTabs(); applyCorner(); refreshGrips(); scheduleProps();
+    return true;
+  }
+  view.onLeaveRequest = () => leaveViewport();
+  view.onEnteredLost = () => { view.entered = null; root.classList.remove('is-in-viewport'); renderTabs(); applyCorner(); };
+  // ---- UCS and a turned view (DR.8; commands.js UCS / PLAN): the active pane turns; nothing in the drawing moves ----
+  // ---- My tools (0.5 DR.9; mytools-ui.js): buttons of your own on the toolbar, their keys, CUIx import ----
+  const getvarForMacro = (n) => ({ ORTHOMODE: settings.ortho ? 1 : 0, GRIDMODE: settings.grid ? 1 : 0, POLARMODE: settings.polar ? 1 : 0,
+    CLAYER: doc.current.layer, TILEMODE: doc.layout ? 0 : 1, CTAB: doc.layout ? doc.layout.name : 'Model', WORLDUCS: activeUcs(doc) ? 0 : 1 })[n] ?? '';   // i18n-ignore (sysvar values)
+  host.myTools = installMyTools({ root, engine, el, t, ask, print, status, lookup: (c) => !!lookup(c), toggle, getvar: getvarForMacro,
+    download: (name, text, mime) => fileHost.download(text, name, mime), focusCommandLine, takenElsewhere: () => new Map(host.shortcuts ? host.shortcuts.keys() : []) });
+  // keyboard shortcuts for any command (0.5 WL.18; keys-ui.js): SHORTCUTS / View › More; never a My tools key
+  host.shortcuts = installShortcuts({ root, engine, el, t, print, status, lookup: (c) => !!lookup(c), focusCommandLine,
+    takenByTools: () => new Map([...keyMap(host.myTools.data())].map(([k, v]) => [k, v.tool.label])) });
+  // the menu styles (0.5 IP.3, input-cadcraft.js + the shell's app-input-ui.js): their messages go to the status bar, and
+  // letters stay CadCraft's while a command runs or something is typed at the command line
+  window.ccInputHooks = { status: (text) => status(text || ''), busy: () => engine.busy || ui.input.value !== '' };
+  host.turnView =(tw) => { if (view.turnTo(tw)) { refreshGrips(); status(t(Math.abs(tw) > 1e-12 ? 'cmd.plan.turned' : 'cmd.plan.world', { ang: fmt(deg(normAngle(tw))) })); } };
+  host.viewTwist = () => view.tw || 0;
+  host.ucsChanged = () => { view.invalidate(true); if (lastRaw) moveCursor(lastRaw); };
+  // COMPARESETTINGS (0.5 WL.12; compare-ui.js): this drawing against itself or another open one
+  host.compareSettings = () => openCompare({ root, el, t, has: hasKey, doc, print,
+    docs: () => tabs.list.map((r) => { const d = tabs.docOf(r.id); return { id: r.id, name: d.meta.name || 'Drawing', doc: d }; }),
+    onChange: (d) => { if (d === doc) { renderLayers(); scheduleProps(); view.invalidate(true); } } }).then(() => focusCommandLine());
+  host.viewportAt = (p) => viewportAt(p);
+  host.enterViewport = (vp) => enterViewport(vp);
+  host.leaveViewport = () => leaveViewport({ command: true });   // PSPACE
+  host.viewportEntered = () => view.enteredViewport()?.vp || null;
+
+  /** The open sheet set's sheets of this drawing (so a tab can show the set's number), or null. */
+  function sheetSetHere() {
+    const set = host.sheetSet?.state?.set;
+    if (!set) return null;
+    const src = String(doc.meta.source || doc.meta.name || '').toLowerCase();
+    return { sheets: set.sheets.filter((s) => !src || String(s.file).toLowerCase().split('/').pop().startsWith(src.replace(/\.(dwg|dxf)$/, ''))) };
+  }
   // ---- model / layout tabs ----
   function renderTabs() {
     const tab = (label, target, selected, title) => {
       const b = el('button', { type: 'button', role: 'tab', className: 'cc-tab', 'aria-selected': String(selected), tabIndex: selected ? 0 : -1, title }, label);
       b.addEventListener('click', async () => {
-        if (selected) return;
+        if (selected && !view.entered) return;
         if (engine.busy && engine.running !== 'VPVIEW') { engine.escape(); await engine.done; }
+        if (view.entered) { leaveViewport(); if (selected) return; }   // VP.4: a click on any tab leaves the viewport
         if (target === '3d') { await open3d(); return; }
         if (host.ws3d?.active) host.ws3d.hide();
         doc.setSpace(target);
@@ -1053,11 +1268,11 @@ function init(root) {
       b.addEventListener('dblclick', () => { if (target && target !== '3d') setTimeout(() => ui.props.querySelector('#cc-sheet-name')?.focus(), 0); });
       return b;
     };
-    const lay = doc.layout, in3d = !!host.ws3d?.active && !lay;
+    const lay = doc.layout || view.enteredViewport()?.lay || null, in3d = !!host.ws3d?.active && !lay;   // a viewport entered: its sheet's tab (VP.4)
     ui.tabs.replaceChildren(
       tab(t('app.tab.model'), null, !lay && !in3d, t('app.drawing_itself_full_size')),
       tab('3D', '3d', in3d, t('app.model_3d_drawing_ground')),
-      ...doc.layouts.map((l) => tab(l.name, l, l === lay, t('app.tab.sheet', { name: l.name }))),
+      ...doc.layouts.map((l) => tab(settings.tabs === 'number' ? sheetNumberOf(l.name, sheetSetHere()) || l.name : l.name, l, l === lay, t('app.tab.sheet', { name: l.name }))),   // WL.9: numbers only, the name in the tooltip
     );
   }
 
@@ -1098,7 +1313,7 @@ function init(root) {
   });
   function applyCorner() {
     view.ucs = settings.corner === 'axes' || settings.corner === 'auto';
-    cube2d.setVisible(settings.corner === 'cube' && doc.inModel && !host.ws3d?.active);
+    cube2d.setVisible(settings.corner === 'cube' && doc.inModel && !view.entered && !host.ws3d?.active);   // not on a sheet, nor in a viewport entered
     host.ws3d?.setCorner(settings.corner === 'auto' ? 'cube' : settings.corner);
     view.invalidate(true);
   }
@@ -1143,7 +1358,7 @@ function init(root) {
     form: ui.plot.querySelector('[data-plot-form]'), what: ui.plot.querySelector('[data-plot-what]'), model: ui.plot.querySelector('[data-plot-model]'),
     area: ui.plot.querySelector('[data-plot-area]'), pick: ui.plot.querySelector('[data-plot-pick]'), paper: ui.plot.querySelector('[data-plot-paper]'),
     orient: ui.plot.querySelector('[data-plot-orient]'), scale: ui.plot.querySelector('[data-plot-scale]'), ink: ui.plot.querySelector('[data-plot-ink]'),
-    pen: ui.plot.querySelector('[data-plot-pen]'), info: ui.plot.querySelector('[data-plot-info]'), canvas: ui.plot.querySelector('[data-plot-canvas]'),
+    pen: ui.plot.querySelector('[data-plot-pen]'), dpi: ui.plot.querySelector('[data-plot-dpi]'), info: ui.plot.querySelector('[data-plot-info]'), canvas: ui.plot.querySelector('[data-plot-canvas]'),
     status: ui.plot.querySelector('[data-plot-status]'), save: ui.plot.querySelector('[data-plot-save]'), open: ui.plot.querySelector('[data-plot-open]'),
     close: ui.plot.querySelector('[data-plot-close]'),
   };
@@ -1169,6 +1384,7 @@ function init(root) {
       }
       plotUi.ink.value = plotPrefs.ink || 'mono';
       plotUi.pen.value = plotPrefs.pen || '0.25';
+      if (plotUi.dpi) plotUi.dpi.value = ['0', '600', '300', '150'].includes(plotPrefs.dpi) ? plotPrefs.dpi : '0';   // pictures: their own resolution, or a cap (WL.13)
       ui.plot.querySelector('[data-plot-publish]').hidden = doc.layouts.length < 2;   // every sheet in one PDF (PUBLISH, 0.4 C36)
       plotUi.status.textContent = '';
       ui.plot.showModal();
@@ -1198,7 +1414,7 @@ function init(root) {
   for (const k of ['area', 'paper', 'orient', 'scale', 'ink', 'pen']) plotUi[k].addEventListener('change', () => { if (k === 'area' && plotUi.area.value !== 'window') plotState.win = null; savePlotPrefs(); updatePlot(); });
   plotUi.pick.addEventListener('click', () => pickPlotWindow());
   function savePlotPrefs() {
-    Object.assign(plotPrefs, { paper: plotUi.paper.value, orient: plotUi.orient.value, area: plotUi.area.value === 'window' ? 'extents' : plotUi.area.value, scale: plotUi.scale.value, ink: plotUi.ink.value, pen: plotUi.pen.value });
+    Object.assign(plotPrefs, { paper: plotUi.paper.value, orient: plotUi.orient.value, area: plotUi.area.value === 'window' ? 'extents' : plotUi.area.value, scale: plotUi.scale.value, ink: plotUi.ink.value, pen: plotUi.pen.value, dpi: plotUi.dpi?.value || '0' });
     try { localStorage.setItem('cadcraft.plot', JSON.stringify(plotPrefs)); } catch { /* private window: fine */ }
   }
   /** Close the dialog, pick two corners on the model through the PLOT command, then open it again. */
@@ -1254,11 +1470,13 @@ function init(root) {
     const list = plotState?.list;
     if (!list) return null;
     plotUi.status.textContent = t('app.making_pdf');
-    const { bytes, report } = await toPdf(list, { pen: +plotUi.pen.value, title: (doc.meta.name || 'Drawing1') + (doc.layout ? ' – ' + doc.layout.name : '') });
+    const { bytes, report } = await toPdf(list, { pen: +plotUi.pen.value, maxDpi: +(plotUi.dpi?.value || 0), title: (doc.meta.name || 'Drawing1') + (doc.layout ? ' – ' + doc.layout.name : '') });
     const name = (doc.meta.name || 'Drawing1') + (doc.layout ? '-' + doc.layout.name : '') + '.pdf';
     plotUi.status.textContent = '';
     print(t(plotState.sheet?.scale ? 'app.plot.done.scale' : 'app.plot.done', { name, bytes: bytes.length.toLocaleString('en-US'), w: fmt(list.w), h: fmt(list.h), scale: plotState.sheet?.scale?.label ?? '' }));
     if (report.missing) print('  ' + t('app.plot.missing_chars', { n: report.missing }));
+    if (report.pictures) print('  ' + t('app.plot.pictures', { n: report.pictures, cap: report.shrunk ? plotUi.dpi.value : '' }));
+    if (report.kept) print('  ' + t('app.plot.pictures_jpeg', { n: report.kept }));
     return { url: URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' })), name: name.replace(/[\\/:*?"<>|]+/g, '_') };
   }
   plotUi.save.addEventListener('click', async () => {
@@ -1333,6 +1551,7 @@ function init(root) {
   const openTypes = () => [
     { description: t('files.type.drawings'), extensions: ['.dwg', '.dxf'] },
     { description: t('files.type.sheetset'), extensions: ['.ccsheets'] },
+    { description: t('files.type.cloud'), extensions: ['.las', '.laz', '.xyz', '.pts'] },   // a point cloud under the drawing (SG.1)
     { description: t('files.type.other'), extensions: ['.json', '.pln', '.pla', '.tpl', '.bpn'] },
   ];
   async function openPicked() {
@@ -1357,6 +1576,10 @@ function init(root) {
   /** `recovered` (dwg-autosave.js): the copy's name, source file and save format; the drawing opens unsaved, and a failure throws. */
   async function openLocal(file, recovered = null) {
     const ext = (file.name.match(/\.([a-z0-9]+)$/i)?.[1] || '').toLowerCase();
+    if (['las', 'laz', 'xyz', 'pts'].includes(ext)) {   // a point cloud goes under the drawing, at its own coordinates (SG.1)
+      try { await attachFile({ host, print, doc }, file); } catch (err) { print(t('pc.failed', { file: file.name, why: err.message })); } finally { busy(null); }
+      return true;
+    }
     if (ext === 'json') { openSketchExport(file); return; }
     if (['pln', 'pla', 'tpl', 'bpn'].includes(ext)) { otherProject(file, ext); return; }
     if (ext === 'ccsheets') { print(t('sheetset.open.viafolder', { file: file.name })); host.sheetSet?.focus(); return; }   // a set needs its folder (its drawings)
@@ -1367,14 +1590,16 @@ function init(root) {
     await frame();
     try {
       const t0 = performance.now();
-      const { drawing, format } = await readDrawing(file, ext);
+      const { drawing, format, bytes } = await readDrawing(file, ext);
       if (!tabs.pristine()) await tabs.add({ name: file.name.replace(/\.[^.]+$/, '') });   // its own tab, as AutoCAD (doctabs.js)
       doc.load({ ...drawing, meta: { ...drawing.meta, name: file.name.replace(/\.[^.]+$/, ''), source: file.name, format, size: file.size } });
       if (recovered) { Object.assign(doc.meta, recovered); doc.savedVersion = -1; doc.emit(); }   // recovered work is not saved to a file yet
+      else import('./live.js').then((m) => m.stampFileHash(doc, bytes)).catch(() => {});   // Studio Live: same file → no snapshot (LV.8)
       lastReport = drawing.report;
       host.setSelection(new Set());
       view.fit();
       view.restorePanes(doc.vports);   // the split screen it was saved with (or one pane)
+      if (!view.panes && doc.inModel && doc.viewTwist) { view.tw = doc.viewTwist; view.fit(); }   // one pane saved turned (DR.8)
       renderTabs();
       renderInfo();
       hideHint();
@@ -1427,7 +1652,7 @@ function init(root) {
     for (const n of res.report.notes) print('  ' + n);
   }
 
-  /** A DWG or DXF on this computer → { drawing (doc.load() input), format }. */
+  /** A DWG or DXF on this computer → { drawing (doc.load() input), format, bytes (as read: Studio Live's file hash) }. */
   async function readDrawing(file, ext) {
     const data = new Uint8Array(await file.arrayBuffer());
     let drawing, format;
@@ -1442,7 +1667,7 @@ function init(root) {
       drawing = importDwg(model, { versionTag: tag });
       format = 'DWG' + (VERSIONS[tag] ? ' ' + VERSIONS[tag] : '') + ' (' + tag + ')';
     }
-    return { drawing, format };
+    return { drawing, format, bytes: data };
   }
 
   /** The drawing model of a DWG (cc-dwg's readDwg), or of a DXF for the library's block adapter (dxf-model.js). */
@@ -1464,6 +1689,21 @@ function init(root) {
   }
 
   /** INSERT, File: pick a DWG/DXF and read it (without opening it). → { drawing, fileName } | null */
+  function pickPictures(multiple) {
+    return new Promise((done) => {
+      const inp = el('input', { type: 'file', accept: '.png,.jpg,.jpeg,image/png,image/jpeg', multiple, className: 'visually-hidden', tabIndex: -1, 'aria-hidden': 'true', 'aria-label': t('app.pictures.pick') });
+      let settled = false;
+      const finish = (v) => { if (settled) return; settled = true; inp.remove(); done(v); };
+      inp.addEventListener('cancel', () => finish([]));
+      inp.addEventListener('change', async () => {
+        const out = [];
+        for (const f of inp.files) out.push({ name: f.name, bytes: new Uint8Array(await f.arrayBuffer()) });
+        finish(out);
+      });
+      root.append(inp);
+      inp.click();
+    });
+  }
   function pickDrawing() {
     return new Promise((done) => {
       const inp = el('input', { type: 'file', accept: '.dwg,.dxf', className: 'visually-hidden', tabIndex: -1, 'aria-hidden': 'true' });
@@ -1521,7 +1761,12 @@ function init(root) {
     beBar.hidden = !be;
     if (!be) return;
     const btn = (label, save) => { const b = el('button', { type: 'button', className: 'cc-te-btn' + (save ? ' is-primary' : '') }, label); b.addEventListener('click', async () => { if (engine.busy) { engine.escape(); await engine.done; } const r = closeBlockEdit(doc, save); showBlockEdit(null); if (r) print(t(save ? 'cmd.bclose.saved' : 'cmd.bclose.discarded', { name: r.name, n: doc.blockUses(r.name) })); view.fit(); focusCommandLine(); }); return b; };
-    beBar.replaceChildren(el('span', {}, t('bedit.banner', { name: be.name })), btn(t('bedit.save'), true), btn(t('bedit.discard'), false));
+    let pick = null;
+    if (be.vis) {   // DB.9: the state shown in the editor
+      pick = el('select', { className: 'cc-select', 'aria-label': t('bedit.state'), title: t('bedit.state'), dataset: { beState: '' } }, ...be.vis.states.map((st) => el('option', { value: st.name, selected: st.name === be.vis.cur }, st.name)));
+      pick.addEventListener('change', async () => { if (engine.busy) { engine.escape(); await engine.done; } switchState(doc, be, pick.value); showBlockEdit(doc.blockEdit); focusCommandLine(); });
+    }
+    beBar.replaceChildren(el('span', {}, t('bedit.banner', { name: be.name })), pick, btn(t('bedit.save'), true), btn(t('bedit.discard'), false));
   }
 
   // ---- Quick select (QSELECT): type, property, operator, value; a live count of what matches ----
@@ -1660,6 +1905,7 @@ function init(root) {
     if (engine.busy && !['SAVE', 'SAVEAS', 'DXFOUT', 'NEW', 'OPEN'].includes(engine.running)) { print(t('app.finish_cancel_current_command')); return; }
     if (!FORMATS[format]) format = 'dwg';
     doc.vports = view.paneState();   // the split screen on screen goes into the file (its VPORT table, cad-files)
+    doc.viewTwist = view.panes ? 0 : doc.inModel && !view.entered ? view.tw || 0 : view.views.get(doc.model)?.tw || 0;   // one pane: the model view's turn (DR.8; the active VPORT's twist)
     let data, report;
     try {
       if (format === 'dwg') ({ bytes: data, report } = saveDwg(doc, { version: dwgVersion() }));
@@ -1673,6 +1919,10 @@ function init(root) {
     const name = (doc.meta.name || 'Drawing1') + '.' + extOf(format), mime = FORMATS[format].mime;
     const types = [{ description: FORMATS[format].label(), extensions: ['.' + extOf(format)], mime }];
     const version = doc.version;
+    // the format is the drawing's from now: host.js starts the download, then awaits its recent list, and a Ctrl+S in
+    // between must already save this format (the flaky browser-save check, 0.5); put back if the save does not happen
+    const before = doc.meta.saveFormat;
+    if (keep) doc.meta.saveFormat = format;
     let r;
     if (!keep) { fileHost.download(data, name, mime); r = { ok: true, how: 'downloaded', name }; }
     else if (as) r = await fileHost.saveAs({ data, name, types, type: mime, title: t('app.save_copy') });
@@ -1680,8 +1930,11 @@ function init(root) {
       const target = saveTargets.get(doc.meta.hostFile);
       r = await fileHost.save({ target: target && target.name.toLowerCase().endsWith('.' + extOf(format)) ? target : null, data, name, types, type: mime });
     }
-    if (!r.ok) { print(r.cancelled ? t('app.not_saved') : t('app.save.failed', { format: FORMATS[format].label(), why: String(r.error?.message || r.error || '') })); return; }
-    if (keep) { doc.meta.saveFormat = format; if (r.target?.writable) keepTarget(r.target); }
+    if (!r.ok) {
+      if (keep && doc.meta.saveFormat === format) { if (before === undefined) delete doc.meta.saveFormat; else doc.meta.saveFormat = before; }
+      print(r.cancelled ? t('app.not_saved') : t('app.save.failed', { format: FORMATS[format].label(), why: String(r.error?.message || r.error || '') })); return;
+    }
+    if (keep && r.target?.writable) keepTarget(r.target);
     if (doc.version === version) doc.markSaved();   // an edit made while the dialog was open stays unsaved
     const src = doc.meta.source || '', file = r.name || name;
     if (r.how === 'written') print(t('app.save.written', { file: r.path || file, format: FORMATS[format].label() }));
@@ -1834,6 +2087,9 @@ function init(root) {
       },
       (err) => { busy(null); console.error(err); print(t('app.handoff.failed', { why: err.message })); });
   }
+  // Studio Live from a link: a page a host serves on the LAN (#live=<code>) or an invite's "Join in the browser"
+  // (?live=<ROOM>#<secret>): live.js asks for a name and joins; the drawing comes from the host
+  if (/[#&]live=|[?&]live=/.test(location.hash + location.search)) import('./live.js').then((m) => m.joinFromPage(window.cadcraft, fileHost), (err) => print(t('live.join_failed', { why: err.message })));
 }
 
 // ---------------------------------------------------------------------------

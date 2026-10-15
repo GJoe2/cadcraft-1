@@ -3,7 +3,7 @@ title: Add text and labels
 summary: Place room labels with single-line text, write wrapped notes with paragraph text typed in place, and edit text afterwards.
 section: tasks
 order: 80
-keywords: text, dtext, mtext, mleader, multileader, leader, revcloud, revision cloud, cloud, find, replace, find and replace, paragraph, wrap, line spacing, label, note, annotation, height, justify, rotation, edit text, ddedit, textedit, font
+keywords: text, dtext, mtext, mleader, multileader, leader, revcloud, revision cloud, cloud, find, replace, find and replace, paragraph, wrap, line spacing, label, note, annotation, height, justify, textmask, background mask, mask, wipeout, rotation, edit text, ddedit, textedit, font
 ---
 
 ## What you will make
@@ -107,6 +107,14 @@ The cloud is a closed polyline of arcs, so it saves in every format.
 3. Click {{ui:Select found}} to select those objects, or type the new words in {{ui:Replace with}} (the list shows what each becomes) and click {{ui:Replace all}}. One {{key:Mod+Z}} undoes every replacement.
 
 A dimension's measured value is not text, so it is never replaced: in `<> TYP.`, only `TYP.` can be.
+
+## Hide the lines behind a label
+
+1. Select the texts, type {{cmd:TEXTMASK}} and press {{key:Enter}}.
+2. `B` paints the drawing's background behind them; `C` asks for a colour number. `O` takes the mask away.
+3. `Border offset factor`: {{key:Enter}} keeps 1.5, half a text height round the text.
+
+The mask covers lines under the text, on screen and when you plot. DWG 2004 or later and DXF 2000 keep it; the 2000 DWG format and DXF R12 cannot, and the save says so.
 
 ## Font
 

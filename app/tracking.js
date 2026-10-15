@@ -9,7 +9,8 @@
  *   trackPoint(acquired, cur, opt)    → { x, y, rays: [{ from, ang }], kind: 'one' | 'two' } | null — the pointer on a
  *                                       ray through an acquired point (horizontal and vertical, or every polar angle
  *                                       with opt.polarAll), or where two rays cross (then both are given)
- * opt: { inc (deg), tol (world units: the screen tolerance ÷ zoom), base (for polar rays in trackPoint), polarAll }
+ * opt: { inc (deg), tol (world units: the screen tolerance ÷ zoom), base (for polar rays in trackPoint), polarAll,
+ *       start (radians: where the angles count from — the UCS X axis, 0.5 DR.8) }
  */
 
 export const POLAR_INCREMENTS = Object.freeze([90, 45, 30, 22.5, 18, 15, 10, 5]);
@@ -25,17 +26,17 @@ function onRay(p, a, q) {
   return { x, y, t, off: Math.hypot(q.x - x, q.y - y) };
 }
 
-/** The angles (radians) of the rays at every multiple of inc degrees. */
-function rayAngles(inc) {
+/** The angles (radians) of the rays at every multiple of inc degrees, counted from `start` (the UCS X axis, DR.8). */
+function rayAngles(inc, start = 0) {
   const n = Math.max(1, Math.round(360 / inc)), out = [];
-  for (let i = 0; i < n; i++) out.push(i * inc * RAD);
+  for (let i = 0; i < n; i++) out.push(start + i * inc * RAD);
   return out;
 }
 
-export function polarTrack(base, cur, { inc = 90, tol = 1 } = {}) {
+export function polarTrack(base, cur, { inc = 90, tol = 1, start = 0 } = {}) {
   if (!base || !cur) return null;
   let best = null;
-  for (const a of rayAngles(inc)) {
+  for (const a of rayAngles(inc, start)) {
     const r = onRay(base, a, cur);
     if (r && r.off <= tol && (!best || r.off < best.off)) best = { ...r, ang: a };
   }
@@ -43,12 +44,12 @@ export function polarTrack(base, cur, { inc = 90, tol = 1 } = {}) {
   return { x: best.x, y: best.y, ang: best.ang, d: best.t, ray: { from: base, ang: best.ang } };
 }
 
-export function trackPoint(acquired, cur, { inc = 90, tol = 1, base = null, polarAll = false } = {}) {
+export function trackPoint(acquired, cur, { inc = 90, tol = 1, base = null, polarAll = false, start = 0 } = {}) {
   if (!cur || !acquired?.length) return null;
-  const angles = polarAll ? rayAngles(inc) : rayAngles(90);
+  const angles = polarAll ? rayAngles(inc, start) : rayAngles(90, start);
   const rays = [];
   for (const p of acquired) for (const a of angles) rays.push({ from: p, ang: a });
-  if (base && polarAll) for (const a of rayAngles(inc)) rays.push({ from: base, ang: a });
+  if (base && polarAll) for (const a of rayAngles(inc, start)) rays.push({ from: base, ang: a });
   // where two rays from different points cross near the pointer wins
   let best = null;
   for (let i = 0; i < rays.length; i++) for (let j = i + 1; j < rays.length; j++) {

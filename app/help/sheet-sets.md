@@ -43,6 +43,17 @@ To open a set later, choose {{ui:Open set…}} and pick the same folder. If the 
 
 Every change is saved in the set file at once.
 
+## Number sheets from their fields
+
+Instead of numbering sheets by hand, let a rule build each number from the sheet's fields, so a sheet that moves to another level or discipline gets its new number by itself.
+
+1. Give each sheet its fields: select it, click {{ui:Rename…}} and, in {{ui:Fields of this sheet}}, write one per line, for example `DISCIPLINE = A` and `LEVEL = 1`. A field the whole set shares (say `DISCIPLINE = A`) can go in the set's {{ui:Properties…}} instead.
+2. Open the panel's menu and click {{ui:Numbering rule…}}.
+3. Write the rule, for example `{DISCIPLINE}-{LEVEL}{SEQ:2}`. `{SEQ}` counts up among the sheets whose other fields read the same, so level 1 gets A-101, A-102 and level 2 starts again at A-201. `{SEQ:2}` writes it with two digits; `{SUBSET}` is the name of the subset a sheet is in.
+4. Choose what happens when a field changes: {{ui:Renumber the sheets}} keeps the numbers following the rule after every change; the other choice numbers them once, now.
+
+The rule is saved in the set file. While it renumbers by itself, change a sheet's fields rather than its number.
+
 ## Fill title blocks from the set
 
 A title block gets its text from the set when its attributes are tagged with a field's name:

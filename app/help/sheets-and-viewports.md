@@ -3,7 +3,7 @@ title: Set up a sheet with a title block and viewports
 summary: Make a sheet (layout) with a border and title block, set the viewport scale, add a second viewport for a detail, and fill in the title block.
 section: tasks
 order: 120
-keywords: layout, sheet, paper space, viewport, mview, vpview, title block, scale, paper size, border, vports, plot scale
+keywords: layout, sheet, paper space, viewport, mview, vpview, title block, scale, paper size, border, vports, plot scale, mspace, pspace, model space, enter viewport, double-click viewport
 ---
 
 ## What you will make
@@ -87,7 +87,43 @@ Do the same for the other fields. Use {{cmd:TEXT}} to write in the empty "DRAWN 
 
 Anything you draw on a sheet tab is on the paper, in paper units: text 3.5 high is 3.5 mm tall on an ISO sheet. Notes, north arrows and sheet borders belong here.
 
-You cannot edit the model through a viewport yet. To change the plan, go to the {{ui:Model}} tab; every viewport shows the change.
+To change the plan itself, go to the {{ui:Model}} tab, or work through a viewport (next section); every viewport shows the change.
+
+## Work on the model through a viewport
+
+1. Double-click inside a viewport, away from its frame. Or type `MS` and press {{key:Enter}}: with one viewport on the sheet it goes straight in; with several, click inside the one you want.
+
+The frame is drawn heavier, the history says you are inside, and the sheet's tab stays selected. Everything you draw or change now is on the model, in model units, as on the {{ui:Model}} tab: a line drawn inside a viewport at 1:100 is in real millimeters. Layers frozen in this viewport cannot be picked here.
+
+2. Turn the wheel or drag with the middle button to zoom and pan what the viewport shows. The sheet stays where it is.
+3. Double-click anywhere outside the frame, or type `PS` and press {{key:Enter}}.
+
+You are back on the sheet. The viewport keeps the view you left it with; {{key:Mod+Z}} puts the old view back in one step. Clicking any tab under the drawing also leaves the viewport.
+
+:::note
+A viewport whose display is locked ({{ui:Display locked}} in Properties) keeps its view: inside it, pan and zoom move the whole sheet instead. A viewport that is turned off cannot be entered.
+:::
+
+## Label a view with its name
+
+A view title under a viewport can show the viewport's view name and keep up with it:
+
+1. Give the view a name: select the viewport's frame and fill in {{ui:View name}} in Properties — or save the view on the {{ui:Model}} tab with {{cmd:NAMEDVIEW}} and, with the viewport selected, type `VPVIEW`, `V` and the view's name: the viewport shows that view and takes its name.
+2. Type `VIEWLABEL` (`VL`) and press {{key:Enter}}, then click where the label goes ({{key:Enter}} puts it under the viewport's lower-left corner).
+
+When the view name changes, the label changes with it, in the same undo step.
+
+## Freeze a layer in one viewport
+
+To hide a layer in one viewport but not the others (furniture in a detail, say):
+
+1. Select the viewport's frame, or work inside it (double-click).
+
+The {{ui:Layers}} panel gets one more button on each row, and a line above the list says so.
+
+2. Click that button on the layer's row.
+
+The layer disappears from that viewport only. Click again to thaw it; {{key:Mod+Z}} undoes either. For several layers or viewports at once, type `VPLAYER`: `F` (Freeze) or `T` (Thaw), the layer names (`A-*` takes every layer starting with A-), then `C` (Current), `A` (All) or `S` (Select). `VPLAYER` `V` (Vpvisdflt) picks layers that new viewports start frozen in.
 
 ## More sheets
 
@@ -100,6 +136,6 @@ Plot a sheet with {{ui:Plot this sheet}} or {{key:Mod+P}}; see [Plot to PDF](top
 - **The viewport shows nothing.** The model is empty, or the view is aimed somewhere else. Select the frame and click {{ui:Show the whole model}}.
 - **The scale list shows only ratios and no feet-and-inch scales.** Set {{ui:Units}} to {{ui:Inches}} or {{ui:Feet}} on the {{ui:Model}} tab.
 - **1:100 looks ten times too big or small.** The drawing units are wrong. Set {{ui:Units}} to what one unit really is.
-- **Clicking the plan inside the viewport selects nothing.** On a sheet you select the sheet's own objects. Edit the plan on the {{ui:Model}} tab.
+- **Clicking the plan inside the viewport selects nothing.** On a sheet you select the sheet's own objects. Double-click inside the viewport first to work on the plan through it.
+- **Clicks outside the viewport do nothing.** You are inside a viewport: double-click outside it, or type `PS`, to work on the sheet again.
 - **"Viewports go on a layout."** {{cmd:MVIEW}} only works on a sheet tab.
-- **A viewport twisted in another program shows square.** Twisted viewports are not built yet.

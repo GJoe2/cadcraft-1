@@ -5,9 +5,9 @@
         "slug": "cadcraft",
         "name": "CadCraft",
         "layer": "red",
-        "role": "2D drafting & documentation",
+        "role": "2D drafting & 3D modeling",
         "tagline": "The drafting table you already know how to use.",
-        "short": "Command-line drafting with layers, blocks, dimensions and layouts that plot. Opens and saves DWG and DXF."
+        "short": "Command-line drafting with layers, blocks, dimensions and layouts that plot, plus a 3D tab for solids. Opens and saves DWG and DXF."
     },
     "others": {
         "bimcraft": "BimCraft",
@@ -19,12 +19,17 @@
         "partcraft": "PartCraft"
     },
     "vendor": {
+        "laz-perf": "0.0.7",
         "manifold-3d": "3.5.4",
+        "noble-ciphers": "2.4.0",
+        "noble-curves": "2.4.0",
+        "noble-hashes": "2.4.0",
+        "proj4": "2.22.0",
         "three": "0.186.1"
     },
     "origin": "https://getcadcraft.com",
     "packed": {
-        "at": "2026-10-13T20:37:08Z",
-        "build": "0.4"
+        "at": "2026-10-15T10:30:05Z",
+        "build": "dev"
     }
 }

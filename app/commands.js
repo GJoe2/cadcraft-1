@@ -32,8 +32,9 @@
 import {
   TAU, dist, angleOf, polar, normAngle, deg, rad, mTranslate, mRotate, mScale, mAbout, mMirror, mMul, mApply, normTag,
   txEntity, offsetEntity, extendEntity, trimSplit, pieceAt, pieceEntity, trimResult, pathCrossings, extensionPart, inWindow, fenceHits, stretchEntity, joinEntities, breakEntity, lengthenEntity, curveLength, paramOn, pathOf, revcloud, entityArea, polygonMeasure, intersect, cornerTarget, filletPair, chamferPair, polyCorners, explodeEntity, entityBounds, validBounds, prims, primPoint, bulgeArc,
+  unitDir, distToPrim, UNBOUNDED, resolveTangent,
 } from './geom.js';
-import { TYPE_NAMES, typeName } from './doc.js';
+import { TYPE_NAMES, typeName, Doc } from './doc.js';
 import { formatMeasure, angularFromLines, DIM_KINDS } from './dims.js';
 import { sheetContents, defaultPaper, makePaper, aimViewport, modelExtents, scaleLabel } from './sheets.js';
 import { defaultAttrs, attrRows, nextNumber, oneLine } from './attrs.js';
@@ -55,6 +56,10 @@ import { installProps } from './propcmds.js';
 import { installLisp } from './lisp/install.js';
 import { isXrefRoot } from './xref.js';
 import { lassoHits, pointInPoly } from './lasso.js';
+import { curveAt, circleTTR, circleTTT } from './tancircle.js';
+import { setVisibility } from './dyn-blocks.js';
+import { openVis, closeVis, switchState, hideIds, showFi, hiddenParts, newState, renameState, deleteState, syncCurrent } from './visedit.js';
+import { activeUcs, toWorld as ucsToWorld, toUcs, vecToWorld, setUcs, threePoint, fromObject, cleanUcs, ucsData, UCS_NAME_RE } from './ucs.js';
 
 export class Cancel extends Error { constructor() { super('Cancel'); } }
 
@@ -146,7 +151,7 @@ export class Engine {
       }
       case 'angle': {
         const n = parseFloat(typed);
-        if (/^[-+]?(\d+\.?\d*|\.\d+)$/.test(typed)) return this.resolve(rad(n));
+        if (/^[-+]?(\d+\.?\d*|\.\d+)$/.test(typed)) return this.resolve(rad(n) + (w.opts.ucs ? activeUcs(this.doc)?.ang || 0 : 0));   // an absolute angle: from the UCS X axis (DR.8)
         break;
       }
       case 'select': {
@@ -165,7 +170,7 @@ export class Engine {
     const w = this.waiting;
     if (!w) return false;
     switch (w.kind) {
-      case 'point': this.resolve({ x: point.x, y: point.y }); return true;
+      case 'point': this.resolve({ x: point.x, y: point.y, ...(point.tan ? { tan: point.tan } : {}) }); return true;   // a deferred tangent (DR.3) rides along
       case 'distance':
         if (w.opts.base) this.resolve(dist(w.opts.base, point));
         else { w.opts.base = point; this.base = point; this.host.prompt(t('cmd.specify_second_point')); }
@@ -242,21 +247,25 @@ export class Engine {
 
   /** Typed point → {x, y} | null. Lengths in the drawing's format (units.js parseLength: 12'6", 6-1/2); angles in degrees. */
   parsePoint(t) {
-    const s = t.trim().replace(/\s*([,<@#])\s*/g, '$1');
+    let s = t.trim().replace(/\s*([,<@#*])\s*/g, '$1');
+    // in the UCS (DR.8: x,y from its origin along its axes, d<a from its X axis); a * after @ / # or first = world coordinates
+    let world = false;
+    s = s.replace(/^([@#]?)\*/, (_m, at) => { world = true; return at; });
+    const u = world ? null : activeUcs(this.doc);
     const L = (x) => parseLength(x, this.doc.meta.lunits);
     const ang = (x) => (/^[-+]?(?:\d+\.?\d*|\.\d+)$/.test(x) ? +x : null);
     let m;
-    if ((m = s.match(/^([@#])?([^,<@#]+),([^,<@#]+)$/))) {
+    if ((m = s.match(/^([@#])?([^,<@#*]+),([^,<@#*]+)$/))) {
       const x = L(m[2]), y = L(m[3]);
       if (x === null || y === null) return null;
-      if (m[1] === '@') { const b = this.lastPoint || { x: 0, y: 0 }; return { x: b.x + x, y: b.y + y }; }
-      return { x, y };
+      if (m[1] === '@') { const b = this.lastPoint || { x: 0, y: 0 }, d = vecToWorld(u, { x, y }); return { x: b.x + d.x, y: b.y + d.y }; }
+      return ucsToWorld(u, { x, y });
     }
-    if ((m = s.match(/^(@)?([^,<@#]+)<([^,<@#]+)$/))) {
+    if ((m = s.match(/^(@)?([^,<@#*]+)<([^,<@#*]+)$/))) {
       const d = L(m[2]), a = ang(m[3]);
       if (d === null || a === null) return null;
-      const from = m[1] ? (this.lastPoint || { x: 0, y: 0 }) : { x: 0, y: 0 };
-      return polar(from, rad(a), d);
+      const from = m[1] ? (this.lastPoint || { x: 0, y: 0 }) : ucsToWorld(u, { x: 0, y: 0 });
+      return polar(from, rad(a) + (u ? u.ang : 0), d);
     }
     const d = L(s);
     if (d !== null) {
@@ -274,8 +283,8 @@ export class Engine {
     // a translated label may not start with the letters to type: then they follow it, 'Deshacer (U)'
     const opts = (w.opts.options || []).filter((o) => !o.hidden).map((o) => (String(o.label).toUpperCase().startsWith(String(o.key).toUpperCase()) ? o.label : o.label + ' (' + o.key + ')'));
     const dOpt = typeof w.opts.default === 'string' ? (w.opts.options || []).find((o) => o.en === w.opts.default && o.en !== o.key) : null;   // a default given as an English label shows translated
-    const def = w.opts.default !== undefined && w.opts.default !== null && w.kind !== 'point'
-      ? ' <' + (w.kind === 'angle' ? fmt(deg(w.opts.default)) : typeof w.opts.default === 'number' ? fmt(w.opts.default) : dOpt ? dOpt.label : w.opts.default) + '>' : '';
+    const def = w.opts.default !== undefined && w.opts.default !== null && (w.kind !== 'point' || dOpt)   // a point prompt shows a default option (UCS <World>)
+      ? ' <' + (w.kind === 'angle' ? fmt(deg(normAngle(w.opts.default - (w.opts.ucs ? activeUcs(this.doc)?.ang || 0 : 0)))) : typeof w.opts.default === 'number' ? fmt(w.opts.default) : dOpt ? dOpt.label : w.opts.default) + '>' : '';
     return w.prompt + (opts.length ? ' [' + opts.join('/') + ']' : '') + def + ':';
   }
 
@@ -429,15 +438,24 @@ const ent = (c, e) => ({ layer: c.doc.current.layer, color: c.doc.current.color,
 def('LINE', ['L'], async (c) => {
   let first = await c.point(t('cmd.mea.p1'), { none: true });
   if (!first) { if (!c.engine.lastPoint) return; first = c.engine.lastPoint; }
-  const start = first;
+  let start = first;
   let prev = first;
+  let deferred = first.tan || null;   // DR.3: the first point snapped Tangent with nothing to measure from yet
   const made = [];
   for (;;) {
-    c.preview((cur) => [{ type: 'line', x1: prev.x, y1: prev.y, x2: cur.x, y2: cur.y }]);
+    c.preview((cur) => { const a = deferred ? resolveTangent(deferred, cur) : prev; return a && !Array.isArray(a) ? [{ type: 'line', x1: a.x, y1: a.y, x2: cur.x, y2: cur.y }] : []; });
     const options = [opt('U', 'Undo')];
     if (made.length >= 2) options.push(opt('C', 'Close'));
-    const p = await c.point(t('cmd.line.specify_next_point'), { base: prev, options, none: true });
+    let p = await c.point(t('cmd.line.specify_next_point'), { base: deferred ? null : prev, options, none: true });
     if (!p) return;
+    if (deferred && !p.option) {   // the tangent's touch point is known now: from this point, or the line touching both circles
+      const r = resolveTangent(deferred, p);
+      if (!r) { c.print(t('cmd.line.no_tangent')); continue; }
+      if (Array.isArray(r)) { prev = r[0]; p = { x: r[1].x, y: r[1].y }; } else prev = r;
+      start = prev; deferred = null;
+    } else if (p.tan) {   // this end snapped Tangent with the line's other end known: the snap already gave the touch point
+      p = { x: p.x, y: p.y };
+    }
     if (p.option === 'U') {
       if (!made.length) { c.print(t('cmd.line.all_segments_already_undone')); continue; }
       const last = made.pop();
@@ -494,8 +512,40 @@ def('PLINE', ['PL'], async (c) => {
   if (pts.length >= 2) c.add(ent(c, { type: 'poly', pts, closed }));
 }, { help: () => t('cmd.pline.polyline_line_arc_segments') });
 
+/** Pick one line, arc, circle or polyline segment (also inside a block) for a tangent circle → { o, at } (tancircle.js). */
+async function pickTangent(c, prompt) {
+  for (;;) {
+    const pick = await c.entity(prompt);
+    const o = curveAt(c.doc.get(pick.id), pick.point, c.doc.blocks);
+    if (o) return { o, at: pick.point };
+    c.print(t('cmd.circle.tan.not_curve'));
+  }
+}
+async function circleTtr(c) {
+  const A = await pickTangent(c, t('cmd.circle.tan.first'));
+  const B = await pickTangent(c, t('cmd.circle.tan.second'));
+  c.preview((cur) => { const k = circleTTR(A.o, A.at, B.o, B.at, Math.max(dist(A.at, cur), 1e-9)); return k ? [{ type: 'circle', ...k }] : []; });
+  const r = await c.distance(t('cmd.circle.specify_radius_circle'), { base: A.at, default: c.engine.lastRadius });
+  if (!(r > 0)) return;
+  const k = circleTTR(A.o, A.at, B.o, B.at, r);
+  if (!k) { c.print(t('cmd.circle.no_circle')); return; }
+  c.engine.lastRadius = r;
+  c.add(ent(c, { type: 'circle', ...k }));
+}
+async function circleTtt(c) {
+  const A = await pickTangent(c, t('cmd.circle.tan.first'));
+  const B = await pickTangent(c, t('cmd.circle.tan.second'));
+  const C = await pickTangent(c, t('cmd.circle.tan.third'));
+  const k = circleTTT(A.o, A.at, B.o, B.at, C.o, C.at);
+  if (!k) { c.print(t('cmd.circle.no_circle')); return; }
+  c.add(ent(c, { type: 'circle', ...k }));
+}
+def('TTR', [], (c) => circleTtr(c), { help: () => t('cmd.ttr.help') });
+
 def('CIRCLE', ['C'], async (c) => {
-  const r0 = await c.point(t('cmd.circle.specify_center_point_circle'), { options: [opt('3P', '3P'), opt('2P', '2P')] });
+  const r0 = await c.point(t('cmd.circle.specify_center_point_circle'), { options: [opt('3P', '3P'), opt('2P', '2P'), opt('T', 'Ttr (tan tan radius)'), { key: 'TTT', label: 'TTT', hidden: true }] });   // i18n-ignore (English option labels: opt() shows opt.<word>)
+  if (r0.option === 'T') return circleTtr(c);   // 0.5 DR.1
+  if (r0.option === 'TTT') return circleTtt(c);   // 0.5 DR.2
   if (r0.option === '2P') {
     const a = await c.point(t('cmd.circle.specify_first_end_point'));
     c.preview((cur) => [{ type: 'circle', cx: (a.x + cur.x) / 2, cy: (a.y + cur.y) / 2, r: dist(a, cur) / 2 }]);
@@ -526,6 +576,108 @@ def('CIRCLE', ['C'], async (c) => {
     return;
   }
 }, { help: () => t('cmd.circle.center_radius_diameter_2') });
+
+// ---- XLINE and RAY (0.5 DR.6): construction lines, infinite both ways / one way (geom.js UNBOUNDED). ----
+/** The direction of a straight object at the pick (a line, construction line, or the polyline segment nearest it) → unit, or null. */
+function straightDir(e, at) {
+  if (!e) return null;
+  if (e.type === 'line') return unitDir(e.x2 - e.x1, e.y2 - e.y1);
+  if (e.type === 'xline' || e.type === 'ray') return { dx: e.dx, dy: e.dy };
+  if (e.type === 'poly') {
+    let best = null, bd = Infinity;
+    for (const q of prims(e)) { if (q.k !== 'L') continue; const d = distToPrim(q, at || { x: q.x1, y: q.y1 }); if (d < bd) { bd = d; best = q; } }
+    return best ? unitDir(best.x2 - best.x1, best.y2 - best.y1) : null;
+  }
+  return null;
+}
+async function pickStraight(c, prompt) {
+  for (;;) {
+    const pick = await c.entity(prompt);
+    const e = c.doc.get(pick.id), u = straightDir(e, pick.point);
+    if (u) return { e, u, at: pick.point };
+    c.print(t('cmd.xline.not_straight'));
+  }
+}
+/** Through points until Enter, each one more construction line of `type` from `base` (null: the point itself, direction u). */
+async function throughPoints(c, type, make) {
+  for (;;) {
+    c.preview((cur) => { const x = make(cur); return x ? [{ type, ...x }] : []; });
+    const p = await c.point(t('cmd.xline.through'), { none: true });
+    if (!p) return;
+    const x = make(p);
+    if (x) c.add(ent(c, { type, ...x })); else c.print(t('cmd.xline.same_point'));
+  }
+}
+def('XLINE', ['XL'], async (c) => {
+  const first = await c.point(t('cmd.xline.first'), { options: [opt('H', 'Hor'), opt('V', 'Ver'), opt('A', 'Ang'), opt('B', 'Bisect'), opt('O', 'Offset')] });
+  const fixed = (u) => (p) => ({ x: p.x, y: p.y, dx: u.dx, dy: u.dy });
+  if (!first.option) {
+    return throughPoints(c, 'xline', (p) => { const u = unitDir(p.x - first.x, p.y - first.y); return u && { x: first.x, y: first.y, ...u }; });
+  }
+  if (first.option === 'H') return throughPoints(c, 'xline', fixed({ dx: 1, dy: 0 }));
+  if (first.option === 'V') return throughPoints(c, 'xline', fixed({ dx: 0, dy: 1 }));
+  if (first.option === 'A') {
+    const a = await c.angle(t('cmd.xline.angle'), { options: [opt('R', 'Reference')], default: activeUcs(c.doc)?.ang || 0, ucs: true });
+    let ang = typeof a === 'number' ? a : 0;
+    if (a && a.option === 'R') {
+      const { u } = await pickStraight(c, t('cmd.xline.ref_line'));
+      const r = await c.angle(t('cmd.xline.angle'), { default: 0 });
+      ang = Math.atan2(u.dy, u.dx) + (typeof r === 'number' ? r : 0);
+    }
+    return throughPoints(c, 'xline', fixed({ dx: Math.cos(ang), dy: Math.sin(ang) }));
+  }
+  if (first.option === 'B') {
+    const v = await c.point(t('cmd.xline.vertex'));
+    const s = await c.point(t('cmd.xline.start'), { base: v });
+    const u0 = unitDir(s.x - v.x, s.y - v.y);
+    if (!u0) { c.print(t('cmd.xline.same_point')); return; }
+    for (;;) {
+      const half = (p) => {
+        const u1 = unitDir(p.x - v.x, p.y - v.y);
+        if (!u1) return null;
+        const b = unitDir(u0.dx + u1.dx, u0.dy + u1.dy) || { dx: -u0.dy, dy: u0.dx };   // opposite rays: the perpendicular
+        return { x: v.x, y: v.y, ...b };
+      };
+      c.preview((cur) => { const x = half(cur); return x ? [{ type: 'xline', ...x }] : []; });
+      const p = await c.point(t('cmd.xline.end'), { base: v, none: true });
+      if (!p) return;
+      const x = half(p);
+      if (x) c.add(ent(c, { type: 'xline', ...x })); else c.print(t('cmd.xline.same_point'));
+    }
+  }
+  if (first.option === 'O') {
+    const d0 = c.engine.xlineOffset;
+    const d = await c.distance(t('cmd.xline.offset'), { options: [opt('T', 'Through')], default: d0 ?? 'Through' });
+    const through = d === 'Through' || (d && d.option === 'T');
+    if (!through) c.engine.xlineOffset = d;
+    for (;;) {
+      const pick = await c.entity(t('cmd.xline.offset_line'), { none: true });
+      if (!pick) return;
+      const e = c.doc.get(pick.id), u = straightDir(e, pick.point);
+      if (!u) { c.print(t('cmd.xline.not_straight')); continue; }
+      const on = e.type === 'line' ? { x: e.x1, y: e.y1 } : e.type === 'poly' ? pick.point : { x: e.x, y: e.y };
+      // the picked line's own point nearest the pick, so the new line is parallel to the very segment picked
+      const foot = (q) => { const k = (q.x - on.x) * u.dx + (q.y - on.y) * u.dy; return { x: on.x + u.dx * k, y: on.y + u.dy * k }; };
+      if (through) {
+        c.preview((cur) => [{ type: 'xline', x: cur.x, y: cur.y, ...u }]);
+        const p = await c.point(t('cmd.xline.through'));
+        c.add(ent(c, { type: 'xline', x: p.x, y: p.y, ...u }));
+      } else {
+        const f = foot(pick.point);
+        c.preview((cur) => { const g = foot(cur), n = unitDir(cur.x - g.x, cur.y - g.y); return n ? [{ type: 'xline', x: f.x + n.dx * d, y: f.y + n.dy * d, ...u }] : []; });
+        const side = await c.point(t('cmd.xline.side'));
+        const g = foot(side), n = unitDir(side.x - g.x, side.y - g.y);
+        if (!n) { c.print(t('cmd.xline.side_on_line')); continue; }
+        c.add(ent(c, { type: 'xline', x: f.x + n.dx * d, y: f.y + n.dy * d, ...u }));
+      }
+    }
+  }
+}, { help: () => t('cmd.xline.help') });
+
+def('RAY', [], async (c) => {
+  const a = await c.point(t('cmd.ray.start'));
+  return throughPoints(c, 'ray', (p) => { const u = unitDir(p.x - a.x, p.y - a.y); return u && { x: a.x, y: a.y, ...u }; });
+}, { help: () => t('cmd.ray.help') });
 
 def('ARC', ['A'], async (c) => {
   const p0 = await c.point(t('cmd.arc.specify_start_point_arc'), { options: [opt('C', 'Center')] });
@@ -618,7 +770,7 @@ def('TEXT', ['DT', 'DTEXT'], async (c) => {
   const h = await c.distance(t('cmd.mtext.height'), { base: at, default: c.doc.current.textHeight });
   if (!h) return;
   c.doc.current.textHeight = h;
-  const rot = await c.angle(t('cmd.attdef.rot'), { base: at, default: 0 });
+  const rot = await c.angle(t('cmd.attdef.rot'), { base: at, default: activeUcs(c.doc)?.ang || 0, ucs: true });   // new text runs along the UCS (DR.8)
   let y = 0;
   for (;;) {
     const line = await c.string(t('cmd.text.enter_text'));
@@ -656,7 +808,7 @@ def('HATCH', ['H', 'BH', 'BHATCH', '-HATCH'], async (c) => {
       continue;
     }
     if (p.option === 'SC') { const v = await c.number(t('cmd.hatch.scale'), { default: S.scale }); if (v > 0) S.scale = v; continue; }
-    if (p.option === 'A') { const v = await c.angle(t('cmd.hatch.angle'), { default: S.angle }); S.angle = normAngle(v || 0); continue; }
+    if (p.option === 'A') { const v = await c.angle(t('cmd.hatch.angle'), { default: S.angle, ucs: true }); S.angle = normAngle(v || 0); continue; }
     if (p.option === 'S') {
       c.preview(null);
       const ids = await c.select(t('cmd.hatch.select'), { fresh: true });
@@ -697,7 +849,7 @@ async function textWords(c, e) {
 
 def('MTEXT', ['MT', 'T'], async (c) => {
   const E = c.engine;
-  const S = { h: c.doc.current.textHeight, ls: E.mtextLs ?? 1, rot: 0, just: E.mtextJust || 'TL', width: null };
+  const S = { h: c.doc.current.textHeight, ls: E.mtextLs ?? 1, rot: normAngle(activeUcs(c.doc)?.ang || 0), just: E.mtextJust || 'TL', width: null };   // along the UCS (DR.8)
   const a = await c.point(t('cmd.mtext.first'));
   const u = () => ({ x: Math.cos(S.rot), y: Math.sin(S.rot) }), n = () => ({ x: -Math.sin(S.rot), y: Math.cos(S.rot) });
   const frame = (b) => {   // the box from corner a to b, in the text's own direction
@@ -715,7 +867,7 @@ def('MTEXT', ['MT', 'T'], async (c) => {
       const key = k?.option || k; if (MTEXT_JUST[key]) S.just = E.mtextJust = key; continue;
     }
     if (p.option === 'L') { const f = await c.number(t('cmd.mtext.ls'), { default: S.ls }); if (f >= 0.25 && f <= 4) S.ls = E.mtextLs = f; else c.print(t('cmd.mtext.ls.bad')); continue; }
-    if (p.option === 'R') { const r = await c.angle(t('cmd.mtext.rot'), { base: a, default: S.rot }); S.rot = normAngle(r || 0); continue; }
+    if (p.option === 'R') { const r = await c.angle(t('cmd.mtext.rot'), { base: a, default: S.rot, ucs: true }); S.rot = normAngle(r || 0); continue; }
     if (p.option === 'W') { const w = await c.distance(t('cmd.mtext.width'), { base: a, default: 0 }); S.width = w || 0; break; }
     b = p; break;
   }
@@ -1217,7 +1369,7 @@ async function breakCmd(c, atPoint) {
     const pick = await c.entity(t('cmd.break.select'));
     const e = c.doc.get(pick.id);
     if (!c.doc.editable(e)) { c.print(t('cmd.corner.err.locked')); continue; }
-    if (!['line', 'arc', 'circle', 'poly'].includes(e.type)) { c.print(t('cmd.break.type')); continue; }
+    if (!['line', 'arc', 'circle', 'poly', 'xline', 'ray'].includes(e.type)) { c.print(t('cmd.break.type')); continue; }
     c.host.setSelection(new Set([e.id]));
     let p1 = onEntity(e, pick.point), p2;
     if (atPoint) { const p = await c.point(t('cmd.break.at')); p1 = onEntity(e, p); p2 = p1; }
@@ -1437,11 +1589,14 @@ function closestT(p, q) { // local import-free helper (geom.primParam without th
 
 /** Entities whose bounds overlap e's (padded) — candidate cutting edges and boundaries. */
 function near(c, e, pad = 0) {
+  const usable = (o) => c.doc.visible(o) && o.type !== 'text' && o.type !== 'point';
+  if (UNBOUNDED.has(e.type)) return c.doc.all().filter((o) => o.id !== e.id && usable(o));   // a construction line reaches everything (DR.6)
   const b = entityBounds(e, c.doc.blocks);
   if (!validBounds(b)) return [];
   const p = pad || Math.max(b.maxX - b.minX, b.maxY - b.minY) * 0.01;
   return c.doc.all().filter((o) => {
-    if (!c.doc.visible(o) || o.type === 'text' || o.type === 'point') return false;
+    if (!usable(o)) return false;
+    if (UNBOUNDED.has(o.type)) return true;   // no bounds to compare: the intersection test decides
     const ob = c.host.boundsOf ? c.host.boundsOf(o) : entityBounds(o, c.doc.blocks);
     return ob.maxX >= b.minX - p && ob.minX <= b.maxX + p && ob.maxY >= b.minY - p && ob.minY <= b.maxY + p;
   });
@@ -1453,7 +1608,7 @@ function near(c, e, pad = 0) {
 // Shift switches trim ↔ extend for that pick. While the pointer rests or drags, what will go (or be added) shows greyed
 // and dashed (preview entities with `ghost`). Quick mode erases an object nothing crosses, as AutoCAD 2021+ does.
 
-const TRIMMABLE = new Set(['line', 'arc', 'circle', 'poly']);
+const TRIMMABLE = new Set(['line', 'arc', 'circle', 'poly', 'xline', 'ray']);
 
 /** The session's TRIM/EXTEND settings (AutoCAD's TRIMEXTENDMODE and EDGEMODE), kept on the engine like FILLET's radius. */
 function trimState(c) { const en = c.engine; en.trimMode ||= 'quick'; en.edgeMode ||= 0; return en; }
@@ -1473,6 +1628,7 @@ function trimCandidates(c, how) {
   for (const p of how.path) { b.minX = Math.min(b.minX, p.x); b.minY = Math.min(b.minY, p.y); b.maxX = Math.max(b.maxX, p.x); b.maxY = Math.max(b.maxY, p.y); }
   return c.doc.all().filter((e) => {
     if (!c.doc.editable(e) || !TRIMMABLE.has(e.type)) return false;
+    if (UNBOUNDED.has(e.type)) return true;   // crossings decide (DR.6)
     const eb = c.host.boundsOf ? c.host.boundsOf(e) : entityBounds(e, c.doc.blocks);
     return validBounds(eb) && eb.maxX >= b.minX && eb.minX <= b.maxX && eb.maxY >= b.minY && eb.minY <= b.maxY;
   });
@@ -1885,9 +2041,9 @@ async function placeDim(c, make, { linear = false } = {}) {
       text = t.trim() === '' ? '' : t;
       continue;
     }
-    if (p.option === 'H') { fixedRot = 0; continue; }
-    if (p.option === 'V') { fixedRot = Math.PI / 2; continue; }
-    if (p.option === 'R') { const a = await c.angle(t('cmd.explode.specify_angle_dimension_line'), { default: 0 }); fixedRot = a ?? 0; continue; }
+    if (p.option === 'H') { fixedRot = normAngle(activeUcs(c.doc)?.ang || 0); continue; }   // along the UCS (DR.8)
+    if (p.option === 'V') { fixedRot = normAngle((activeUcs(c.doc)?.ang || 0) + Math.PI / 2); continue; }
+    if (p.option === 'R') { const a = await c.angle(t('cmd.explode.specify_angle_dimension_line'), { default: activeUcs(c.doc)?.ang || 0, ucs: true }); fixedRot = a ?? 0; continue; }
     const d = make(p, fixedRot, text);
     if (!d) { c.print(t('cmd.explode.pick_point_inside_angle')); continue; }
     c.preview(null);
@@ -1899,11 +2055,13 @@ async function placeDim(c, make, { linear = false } = {}) {
 }
 
 /** Horizontal or vertical, as AutoCAD picks it from where the dimension line goes. */
-function linearRot(p1, p2, cur) {
-  const minX = Math.min(p1.x, p2.x), maxX = Math.max(p1.x, p2.x), minY = Math.min(p1.y, p2.y), maxY = Math.max(p1.y, p2.y);
-  const outX = cur.x < minX ? minX - cur.x : cur.x > maxX ? cur.x - maxX : 0;
-  const outY = cur.y < minY ? minY - cur.y : cur.y > maxY ? cur.y - maxY : 0;
-  return outY >= outX ? 0 : Math.PI / 2;
+/** Horizontal or vertical by where the dimension line goes — in the UCS (DR.8): its X axis is "horizontal". */
+function linearRot(p1, p2, cur, u = null) {
+  const a = toUcs(u, p1), b = toUcs(u, p2), q = toUcs(u, cur), base = u ? u.ang : 0;
+  const minX = Math.min(a.x, b.x), maxX = Math.max(a.x, b.x), minY = Math.min(a.y, b.y), maxY = Math.max(a.y, b.y);
+  const outX = q.x < minX ? minX - q.x : q.x > maxX ? q.x - maxX : 0;
+  const outY = q.y < minY ? minY - q.y : q.y > maxY ? q.y - maxY : 0;
+  return normAngle(base + (outY >= outX ? 0 : Math.PI / 2));
 }
 
 /** Two extension line origins: picked points, or (Enter) an object's ends. */
@@ -1930,7 +2088,7 @@ async function twoOrigins(c) {
 
 def('DIMLINEAR', ['DLI', 'DIMLIN'], async (c) => {
   const [p1, p2] = await twoOrigins(c);
-  await placeDim(c, (cur, rot, text) => dimEnt(c, { kind: 'linear', p1, p2, loc: P(cur), rot: rot ?? linearRot(p1, p2, cur), text }), { linear: true });
+  await placeDim(c, (cur, rot, text) => dimEnt(c, { kind: 'linear', p1, p2, loc: P(cur), rot: rot ?? linearRot(p1, p2, cur, activeUcs(c.doc)), text }), { linear: true });
 }, { help: () => t('cmd.dimlinear.horizontal_vertical_distance_r') });
 
 def('DIMALIGNED', ['DAL', 'DIMALI'], async (c) => {
@@ -2213,7 +2371,7 @@ def('ATTDEF', ['ATT', 'DDATTDEF', '-ATTDEF'], async (c) => {
   const at = await c.point(t('cmd.attdef.at'));
   const h = await c.distance(t('cmd.attdef.height'), { base: at, default: c.doc.current.textHeight });
   if (!(h > 0)) return;
-  const rot = await c.angle(t('cmd.attdef.rot'), { base: at, default: 0 });
+  const rot = await c.angle(t('cmd.attdef.rot'), { base: at, default: activeUcs(c.doc)?.ang || 0, ucs: true });   // new text runs along the UCS (DR.8)
   c.add(ent(c, { type: 'text', x: at.x, y: at.y, h, rot: normAngle(rot || 0), s: tag, ha: 'left', va: 'baseline', wf: 1, attdef: { tag, prompt, def, invisible: M.invisible, constant: M.constant, preset: M.preset } }));
   c.print(t('cmd.attdef.made', { tag }));
 }, { help: () => t('cmd.attdef.help') });
@@ -2240,10 +2398,14 @@ def('BEDIT', ['BE'], async (c) => {
   if (link) { c.print(t('cmd.xref.readonly', { name: link })); return; }
   const blk = doc.blocks.get(name);
   const map = new Map();
-  for (const e of [...blk.entities, ...(blk.attdefs || []).map(attdefText)]) { const x = { color: null, ...e, id: doc.nextId++ }; map.set(x.id, x); }
+  const vis = openVis(doc, blk);   // DB.9: a block with visibility states opens on one of them, the others kept aside
+  for (const e of vis ? vis.entities : blk.entities) { const x = e.id ? e : { color: null, ...e, id: doc.nextId++ }; map.set(x.id, x); }
+  for (const e of (blk.attdefs || []).map(attdefText)) { const x = { color: null, ...e, id: doc.nextId++ }; map.set(x.id, x); }
+  if (vis) delete vis.entities;
   const from = doc.layout ? doc.layout.name : null;
   c.host.setSelection(new Set());
-  doc.blockEdit = { name, map, base: { ...blk.base }, mark: doc.mark(), from };
+  doc.blockEdit = { name, map, base: { ...blk.base }, mark: doc.mark(), from, ...(vis ? { vis } : {}) };
+  if (vis) c.print(t('cmd.bvstate.open', { state: vis.cur, n: vis.states.length }));
   doc.setSpace({ entities: map });
   c.host.onBlockEdit?.(doc.blockEdit);
   c.host.zoomExtents?.();
@@ -2258,7 +2420,14 @@ export function closeBlockEdit(doc, save) {
   doc.blockEdit = null;
   doc.setSpace(be.from);
   if (save) {
-    doc.change('BEDIT', () => doc.defineBlock({ name: be.name, base: be.base, entities, attdefs }));
+    const vr = be.vis ? closeVis(doc, be, entities) : null;
+    if (vr?.block) {   // DB.9: still dynamic, with its states as edited; references follow renamed / deleted states
+      doc.change('BEDIT', () => doc.defineBlock({ ...vr.block, entities: vr.block.entities, ...(attdefs.length ? { attdefs } : {}) }));
+      followStates(doc, be.name, vr);
+    } else {
+      doc.change('BEDIT', () => doc.defineBlock({ name: be.name, base: be.base, entities, attdefs }));
+      if (vr?.plain) be.note = 'cmd.bvstate.plain';
+    }
     doc.squash(be.mark, 'BEDIT');
   } else {
     while (doc.undoStack.length > be.mark) doc.undo();
@@ -2266,6 +2435,107 @@ export function closeBlockEdit(doc, save) {
   }
   return be;
 }
+
+/** After the visibility states changed in the editor: references take renamed states, a deleted one → the first state. */
+function followStates(doc, def, vr) {
+  const maps = [doc.model, ...doc.layouts.map((l) => l.entities)];
+  for (const map of maps) for (const e of [...map.values()]) {
+    if (e.type !== 'insert' || !e.dyn) continue;
+    const B = doc.blocks.get(e.block);
+    if (!B?.dyn || !(B.name === def || B.dyn.of === def)) continue;
+    const was = e.dyn.state ?? null;
+    const now = was && vr.deleted.has(was) ? vr.first : was && vr.renamed.has(was) ? vr.renamed.get(was) : was;
+    const gone = was && vr.deleted.has(was);   // its state is gone: back on the definition, then the first state (below)
+    if (now !== was) doc.change('BEDIT', () => doc.update(e.id, { ...e, ...(gone ? { block: def } : {}), dyn: { ...e.dyn, state: now, values: (e.dyn.values || []).map((v) => (v.state === was ? { ...v, state: now } : v)) } }, map));
+    // a reference whose block no longer shows its state's objects — on the definition (it now shows another state) or on
+    // a copy made for the state before its objects changed — moves to a copy that does (setVisibility reuses or makes one)
+    const cur = map.get(e.id), st = cur.dyn.state ?? (cur.block === def ? vr.current : null);
+    const want = st !== null ? doc.blocks.get(def)?.dyn?.vis?.states.find((s) => s.name === st) : null;
+    if (want && !showsState(doc.blocks.get(cur.block)?.dyn, want)) setVisibility(doc, e.id, st, map);
+  }
+}
+
+/** A dynamic block's shown flags are exactly a state's objects (attribute definitions aside). */
+function showsState(d, st) {
+  if (!d || !Array.isArray(d.shown)) return true;   // nothing to compare: leave it
+  const ad = new Set(d.ad || []), on = new Set(st.show);
+  return d.shown.every((v, i) => ad.has(i) || !!v === on.has(i));
+}
+
+// ---- BVSTATE / BVHIDE / BVSHOW (0.5 DB.9; visedit.js): visibility states of a block that has them, in the block editor ----
+function visEditor(c) {
+  const be = c.doc.blockEdit;
+  if (!be) { c.print(t('cmd.bvstate.no_editor')); return null; }
+  if (!be.vis) { c.print(t('cmd.bvstate.no_states', { name: be.name })); return null; }
+  return be;
+}
+const stateErr = (c, e, name) => c.print(t('cmd.bvstate.err.' + e, { name }));
+def('BVSTATE', ['BVS'], async (c) => {
+  const be = visEditor(c);
+  if (!be) return;
+  const v = be.vis;
+  syncCurrent(v, be.map);
+  c.print(t('cmd.bvstate.list', { list: v.states.map((s) => (s.name === v.cur ? '[' + s.name + ']' : s.name)).join(', ') }));
+  const k = await c.keyword(t('cmd.bvstate.ask', { state: v.cur }), { options: [opt('S', 'Set current'), opt('N', 'New'), opt('R', 'Rename'), opt('D', 'Delete')], default: 'Set current' });   // i18n-ignore (English option labels: opt() shows opt.<word>)
+  const o = k?.option || (k === 'Set current' ? 'S' : k);   // i18n-ignore (the default keyword comes back as its English label)
+  const ask = async (key, def) => String(await c.string(t(key), def !== undefined ? { default: def } : {}) || '').trim();
+  if (o === 'S') {
+    const name = await ask('cmd.bvstate.which');
+    if (!name) return;
+    const e = switchState(c.doc, be, name);
+    if (e) stateErr(c, e, name); else c.print(t('cmd.bvstate.current', { state: be.vis.cur }));
+  } else if (o === 'N') {
+    const name = await ask('cmd.bvstate.new_name');
+    if (!name) return;
+    const h = await c.keyword(t('cmd.bvstate.new_how'), { options: [opt('H', 'Hide all'), opt('S', 'Show all'), opt('K', 'Keep current')], default: 'Keep current' });   // i18n-ignore (English option labels: opt() shows opt.<word>)
+    const how = { H: 'hide', S: 'show' }[h?.option] || 'keep';
+    const e = newState(be, name, how);
+    if (e) { stateErr(c, e, name); return; }
+    switchState(c.doc, be, name);
+    c.print(t('cmd.bvstate.made', { state: name }));
+  } else if (o === 'R') {
+    const from = await ask('cmd.bvstate.which', v.cur);
+    const to = from && await ask('cmd.bvstate.new_name');
+    if (!to) return;
+    const e = renameState(be, from, to);
+    if (e) stateErr(c, e, from); else c.print(t('cmd.bvstate.renamed', { from, to }));
+  } else if (o === 'D') {
+    const name = await ask('cmd.bvstate.which');
+    if (!name) return;
+    const e = deleteState(be, name);
+    if (e) stateErr(c, e, name); else c.print(t('cmd.bvstate.deleted', { state: name }));
+  }
+  c.host.onBlockEdit?.(c.doc.blockEdit);
+}, { noRepeat: true, help: () => t('cmd.bvstate.help') });
+def('BVHIDE', ['BVH'], async (c) => {
+  const be = visEditor(c);
+  if (!be) return;
+  const ids = await c.select(t('cmd.bvhide.select'));
+  if (!ids?.size) return;
+  const n = hideIds(c.doc, be, [...ids]);
+  c.print(n ? t('cmd.bvhide.done', { n, state: be.vis.cur }) : t('cmd.bvhide.none'));
+}, { help: () => t('cmd.bvhide.help') });
+def('BVSHOW', ['BVSH'], async (c) => {
+  const be = visEditor(c);
+  if (!be) return;
+  const fis = [];
+  for (;;) {
+    const hidden = hiddenParts(be).filter((h) => !fis.includes(h.fi));
+    if (!hidden.length) { if (!fis.length) c.print(t('cmd.bvshow.none', { state: be.vis.cur })); break; }
+    c.preview(() => hidden.flatMap((h) => h.parts.map((p) => ({ ...p, ghost: true }))));
+    const p = await c.point(t('cmd.bvshow.pick'), { none: true });
+    if (!p) break;
+    const tol = c.host.pickRadius?.() ?? 1;
+    let best = null, bd = Infinity;
+    for (const h of hidden) for (const part of h.parts) for (const q of prims(part, c.doc.blocks)) { const d = distToPrim(q, p); if (d < bd) { bd = d; best = h.fi; } }
+    if (best === null || bd > tol) { c.print(t('cmd.bvshow.miss')); continue; }
+    fis.push(best);
+  }
+  if (!fis.length) return;
+  const n = showFi(c.doc, be, fis);
+  c.print(t('cmd.bvshow.done', { n, state: be.vis.cur }));
+}, { help: () => t('cmd.bvshow.help') });
+def('BPARAMETER', ['BPARAM'], (c) => { c.print(t('cmd.bparameter.not_built')); }, { help: () => t('cmd.bparameter.help') });
 
 def('BCLOSE', [], async (c) => {
   const be = c.doc.blockEdit;
@@ -2275,6 +2545,7 @@ def('BCLOSE', [], async (c) => {
   closeBlockEdit(c.doc, save);
   c.host.onBlockEdit?.(null);
   c.print(t(save ? 'cmd.bclose.saved' : 'cmd.bclose.discarded', { name: be.name, n: c.doc.blockUses(be.name) }));
+  if (be.note) c.print(t(be.note, { name: be.name }));
 }, { noRepeat: true, help: () => t('cmd.bclose.help') });
 
 function nests(doc, inner, name, depth = 0) {
@@ -2331,7 +2602,7 @@ export async function placeBlock(c, name, { scale = null, attrs = null } = {}) {
     c.preview((cur) => [{ type: 'insert', layer: c.doc.current.layer, block: name, x: cur.x, y: cur.y, sx: sc, sy: sc, rot, attrs: values }]);
     const p = await c.point(t('cmd.pasteclip.specify_insertion_point'), { options: [opt('S', 'Scale'), opt('R', 'Rotate')] });
     if (p.option === 'S') { const v = await c.number(t('cmd.scale.specify_scale_factor'), { default: sc }); if (v) sc = v; c.engine.lastInsertScale = sc; continue; }
-    if (p.option === 'R') { const a = await c.angle(t('cmd.mtext.rot'), { default: rot }); rot = normAngle(a ?? 0); c.engine.lastInsertRot = rot; continue; }
+    if (p.option === 'R') { const a = await c.angle(t('cmd.mtext.rot'), { default: rot, ucs: true }); rot = normAngle(a ?? 0); c.engine.lastInsertRot = rot; continue; }
     c.preview(null);
     for (const d of blk?.attdefs || []) {
       if (d.constant || d.preset) continue;
@@ -2443,7 +2714,8 @@ def('MVIEW', ['MV'], async (c) => {
   if (w < 1e-9 || h < 1e-9) { c.print(t('cmd.mview.viewport_needs_width_height')); return; }
   const aim = aimViewport(c.doc, lay.paper.unit, w, h, modelExtents(c.doc));
   if (!c.doc.layers.has('Viewports')) c.doc.addLayer({ name: 'Viewports', color: 8, plot: false });
-  c.doc.change('MVIEW', () => c.doc.add({ type: 'viewport', layer: 'Viewports', color: null, x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, w, h, cx: aim.cx, cy: aim.cy, s: aim.s }));
+  const frz = [...c.doc.layers.values()].filter((l) => l.newVpFrozen).map((l) => l.name);   // layers frozen in new viewports (VP.2)
+  c.doc.change('MVIEW', () => c.doc.add({ type: 'viewport', layer: 'Viewports', color: null, x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, w, h, cx: aim.cx, cy: aim.cy, s: aim.s, ...(frz.length ? { frz } : {}) }));
   c.print(t('cmd.mview.made', { scale: scaleLabel(c.doc, lay.paper.unit, aim.s) }));
 }, { help: () => t('cmd.mview.viewport_onto_model_layout') });
 
@@ -2481,20 +2753,273 @@ def('VPVIEW', [], async (c) => {
     if (e.type === 'viewport') vp = e; else c.print(t('cmd.vpview.pick_viewport_border'));
   }
   if (vp.locked) { c.print(t('cmd.vpview.locked')); return; }   // display locked (Properties, P.7)
+  // WL.11: a named view of the model (option View at the first corner) sets the viewport's view and its name
+  const modelViews = c.doc.views.filter((v) => !v.layout);
   c.host.setSelection(new Set());
   c.doc.setSpace(null);
-  let win;
+  let win, named = null;
   try {
     c.print(t('cmd.vpview.pick'));
-    const a = await c.point(t('cmd.vpview.specify_first_corner_window'));
-    c.preview((cur) => [rect(a, cur)]);
-    const b = await c.point(t('cmd.mtext.corner'), { base: a });
-    win = { minX: Math.min(a.x, b.x), minY: Math.min(a.y, b.y), maxX: Math.max(a.x, b.x), maxY: Math.max(a.y, b.y) };
+    const a = await c.point(t('cmd.vpview.specify_first_corner_window'), modelViews.length ? { options: [opt('V', 'View')] } : {});
+    if (a?.option === 'V') {
+      const name = String(await c.string(t('cmd.vpview.view_name', { list: modelViews.map((v) => v.name).join(', ') })) || '').trim();
+      named = modelViews.find((x) => x.name.toLowerCase() === name.toLowerCase());
+      if (!named) { c.print(t('cmd.nv.unknown', { name, list: modelViews.map((x) => x.name).join(', ') })); return; }
+    } else {
+      c.preview((cur) => [rect(a, cur)]);
+      const b = await c.point(t('cmd.mtext.corner'), { base: a });
+      win = { minX: Math.min(a.x, b.x), minY: Math.min(a.y, b.y), maxX: Math.max(a.x, b.x), maxY: Math.max(a.y, b.y) };
+    }
   } finally { c.doc.setSpace(lay); }
+  if (named) {
+    const s = Math.min(vp.w / named.w, vp.h / named.h);
+    c.doc.change('VPVIEW', () => c.doc.update(vp.id, { ...c.doc.get(vp.id), cx: named.cx, cy: named.cy, s, vname: named.name }));
+    c.print(t('cmd.vpview.view_done', { name: named.name, scale: scaleLabel(c.doc, lay.paper.unit, s) }));
+    return;
+  }
   const aim = aimViewport(c.doc, lay.paper.unit, vp.w, vp.h, win);
   c.doc.change('VPVIEW', () => c.doc.update(vp.id, { ...c.doc.get(vp.id), cx: aim.cx, cy: aim.cy, s: aim.s }));
   c.print(t('cmd.vpview.done', { scale: scaleLabel(c.doc, lay.paper.unit, aim.s) }));
 }, { help: () => t('cmd.vpview.set_what_viewport_shows') });
+
+// ---- UCS and PLAN (0.5 DR.8; ucs.js): a coordinate system of your own and a turned view. Neither is an edit (no undo
+// step, no unsaved mark): objects keep their world coordinates. As with UCSFOLLOW 1, setting a UCS turns the active pane's
+// view so its X axis is level; PLAN turns it back to the UCS or the world. Sheets work in paper coordinates. ----
+const ucsLabel = (c, u) => (u ? t('cmd.ucs.is', { at: fmtLen(c, u.x) + ', ' + fmtLen(c, u.y), ang: fmt(deg(normAngle(u.ang))) }) : t('cmd.ucs.world'));
+function afterUcs(c) {
+  const u = c.doc.ucs;
+  c.host.ucsChanged?.();
+  c.host.turnView?.(u ? u.ang : 0);
+  c.print(ucsLabel(c, u));
+}
+def('UCS', [], async (c) => {
+  if (!c.doc.inModel) { c.print(t('cmd.ucs.sheet')); return; }
+  const cur = c.doc.ucs;
+  const r = await c.point(t('cmd.ucs.origin'), { options: [opt('NA', 'NAmed'), opt('OB', 'OBject'), opt('P', 'Previous'), opt('W', 'World'), opt('Z', 'Z'), opt('3', '3point')], default: 'World' });
+  const key = r === 'World' ? 'W' : r?.option;
+  if (!key) {   // a new origin, then (Enter keeps the angle) a point on the X axis
+    const o = { x: r.x, y: r.y };
+    c.preview((p) => [{ type: 'line', x1: o.x, y1: o.y, x2: p.x, y2: p.y }]);
+    const px = await c.point(t('cmd.ucs.xaxis'), { base: o, none: true });
+    setUcs(c.doc, px && dist(o, px) > 1e-12 ? threePoint(o, px) : { x: o.x, y: o.y, ang: cur ? cur.ang : 0 });
+    return afterUcs(c);
+  }
+  if (key === 'W') { setUcs(c.doc, null); return afterUcs(c); }
+  if (key === 'P') {
+    if (!c.doc.ucsPrev?.length) { c.print(t('cmd.ucs.no_previous')); return; }
+    setUcs(c.doc, c.doc.ucsPrev.pop(), { remember: false });
+    return afterUcs(c);
+  }
+  if (key === 'Z') {
+    const a = await c.angle(t('cmd.ucs.zangle'), { default: Math.PI / 2 });
+    setUcs(c.doc, { x: cur ? cur.x : 0, y: cur ? cur.y : 0, ang: (cur ? cur.ang : 0) + (typeof a === 'number' ? a : Math.PI / 2) });
+    return afterUcs(c);
+  }
+  if (key === '3') {
+    const o0 = ucsToWorld(cur, { x: 0, y: 0 });
+    const o = (await c.point(t('cmd.ucs.p_origin'), { none: true })) || o0;
+    c.preview((p) => [{ type: 'line', x1: o.x, y1: o.y, x2: p.x, y2: p.y }]);
+    const px = await c.point(t('cmd.ucs.p_x'), { base: o, none: true });
+    const u = px ? threePoint(o, px) : { x: o.x, y: o.y, ang: cur ? cur.ang : 0 };
+    if (px && !u) { c.print(t('cmd.ucs.same_point')); return; }
+    await c.point(t('cmd.ucs.p_y'), { base: o, none: true });   // in a flat drawing the Y side is the usual one: read, not used
+    setUcs(c.doc, u);
+    return afterUcs(c);
+  }
+  if (key === 'OB') {
+    for (;;) {
+      const pick = await c.entity(t('cmd.ucs.object'));
+      const u = fromObject(c.doc.get(pick.id), pick.point, c.doc.blocks);
+      if (!u) { c.print(t('cmd.ucs.object_no')); continue; }
+      setUcs(c.doc, u);
+      return afterUcs(c);
+    }
+  }
+  if (key === 'NA') {
+    const k = await c.keyword(t('cmd.ucs.named'), { options: [opt('R', 'Restore'), opt('S', 'Save'), opt('D', 'Delete'), opt('?', '?')], default: 'Restore' });
+    const kk = k === 'Restore' ? 'R' : k?.option;
+    const list = (c.doc.ucsNamed ||= []);
+    const find = (name) => list.findIndex((x) => x.name.toUpperCase() === String(name).trim().toUpperCase());
+    if (kk === '?') { c.print(list.length ? list.map((x) => x.name + ': ' + ucsLabel(c, cleanUcs(x))).join('\n') : t('cmd.ucs.none_saved')); return; }
+    const name = String(await c.string(t(kk === 'S' ? 'cmd.ucs.save_as' : kk === 'D' ? 'cmd.ucs.delete_which' : 'cmd.ucs.restore_which')) || '').trim();
+    if (!name) return;
+    const i = find(name);
+    if (kk === 'S') {
+      if (!UCS_NAME_RE.test(name)) { c.print(t('cmd.ucs.bad_name')); return; }
+      const rec = { name, ...(ucsData(cur) || { x: 0, y: 0, ang: 0 }) };
+      if (i >= 0) list[i] = rec; else list.push(rec);
+      c.print(t('cmd.ucs.saved', { name }));
+      return;
+    }
+    if (i < 0) { c.print(t('cmd.ucs.no_such', { name })); return; }
+    if (kk === 'D') { list.splice(i, 1); c.print(t('cmd.ucs.deleted', { name })); return; }
+    setUcs(c.doc, list[i]);
+    return afterUcs(c);
+  }
+}, { noRepeat: true, keepSelection: true, help: () => t('cmd.ucs.help') });
+// View › More: turn the view a quarter (= UCS Z ∓90, then the view follows) or back to the world; their own names, so
+// the aliases file can give them a key (ALIASEDIT: TL=TURNLEFT)
+function quarterTurn(c, sign) {
+  if (!c.doc.inModel) { c.print(t('cmd.ucs.sheet')); return; }
+  const cur = c.doc.ucs;
+  setUcs(c.doc, sign ? { x: cur ? cur.x : 0, y: cur ? cur.y : 0, ang: (cur ? cur.ang : 0) + sign * Math.PI / 2 } : null);
+  afterUcs(c);
+}
+def('TURNLEFT', [], (c) => quarterTurn(c, -1), { noRepeat: true, keepSelection: true, help: () => t('cmd.turnleft.help') });
+def('TURNRIGHT', [], (c) => quarterTurn(c, 1), { noRepeat: true, keepSelection: true, help: () => t('cmd.turnright.help') });
+def('TURNWORLD', [], (c) => quarterTurn(c, 0), { noRepeat: true, keepSelection: true, help: () => t('cmd.turnworld.help') });
+
+def('PLAN', [], async (c) => {
+  const k = await c.keyword(t('cmd.plan.ask'), { options: [opt('C', 'Current ucs'), opt('U', 'Ucs'), opt('W', 'World')], default: 'Current ucs' });   // i18n-ignore (English option labels: opt() shows opt.<word>)
+  const kk = k === 'Current ucs' ? 'C' : k?.option;   // i18n-ignore (the default, as given)
+  let ang = 0;
+  if (kk === 'C') ang = activeUcs(c.doc)?.ang || 0;
+  if (kk === 'U') {
+    const name = String(await c.string(t('cmd.ucs.restore_which')) || '').trim();
+    const rec = (c.doc.ucsNamed || []).find((x) => x.name.toUpperCase() === name.toUpperCase());
+    if (!rec) { c.print(t('cmd.ucs.no_such', { name })); return; }
+    ang = rec.ang;
+  }
+  if (!c.host.turnView) { c.print(t('cmd.plan.browser')); return; }
+  c.host.turnView(ang);
+  c.print(t(ang ? 'cmd.plan.turned' : 'cmd.plan.world', { ang: fmt(deg(normAngle(ang))) }));
+}, { noRepeat: true, keepSelection: true, help: () => t('cmd.plan.help') });
+
+// ---- SHORTCUTS (0.5 WL.18): keys for any command, beside the aliases file ----
+def('SHORTCUTS', ['KEYS'], async (c) => {
+  if (!c.host.shortcuts) { c.print(t('keys.browser')); return; }
+  await c.host.shortcuts.open();
+}, { noRepeat: true, keepSelection: true, help: () => t('keys.help') });
+
+// ---- COMPARESETTINGS (0.5 WL.12): dimension styles, text styles, layers, sheets and units side by side ----
+def('COMPARESETTINGS', ['CMPSET'], async (c) => {
+  if (!c.host.compareSettings) { c.print(t('cmd.cmp.browser')); return; }
+  await c.host.compareSettings();
+}, { noRepeat: true, keepSelection: true, help: () => t('cmd.cmp.help') });
+
+// ---- VPLAYER (0.5 VP.2): freeze layers in some viewports only. The Layers panel's viewport column does the same for one
+// viewport; the layer flag "frozen in new viewports" (Vpvisdflt) is what MVIEW starts a viewport with. ----
+const wildRe = (pat) => new RegExp('^' + String(pat).trim().replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.') + '$', 'i');
+function layerNames(c, text) {
+  const pats = String(text || '').split(',').map((x) => x.trim()).filter(Boolean);
+  const names = [...c.doc.layers.keys()];
+  return [...new Set(pats.flatMap((p) => names.filter((n) => wildRe(p).test(n))))];
+}
+def('VPLAYER', [], async (c) => {
+  const ev = c.host.viewportEntered?.();
+  const map = ev ? (c.doc.layouts.find((l) => [...l.entities.values()].includes(ev)) || {}).entities : c.doc.layout ? c.doc.entities : null;
+  if (!map) { c.print(t('cmd.vplayer.sheet_first')); return; }
+  const allVps = () => [...map.values()].filter((e) => e.type === 'viewport');
+  const current = () => ev || [...c.host.selection].map((id) => map.get(id)).find((e) => e?.type === 'viewport') || null;
+  for (;;) {
+    const k = await c.keyword(t('cmd.vplayer.ask'), { options: [opt('?', '?'), opt('F', 'Freeze'), opt('T', 'Thaw'), opt('R', 'Reset'), opt('V', 'Vpvisdflt')], none: true });
+    const key = k?.option;
+    if (!key) return;
+    if (key === '?') {
+      const vp = current() || allVps()[0];
+      if (!vp) { c.print(t('cmd.vplayer.none')); continue; }
+      c.print((vp.frz || []).length ? t('cmd.vplayer.list', { list: vp.frz.join(', ') }) : t('cmd.vplayer.list_none'));
+      continue;
+    }
+    const raw = await c.string(t(key === 'F' ? 'cmd.vplayer.names_freeze' : key === 'T' ? 'cmd.vplayer.names_thaw' : key === 'R' ? 'cmd.vplayer.names_reset' : 'cmd.vplayer.names_dflt'));
+    const names = layerNames(c, raw);
+    if (!names.length) { c.print(t('cmd.vplayer.no_layer', { text: String(raw || '').slice(0, 60) })); continue; }
+    if (key === 'V') {
+      const f = await c.keyword(t('cmd.vplayer.dflt'), { options: [opt('F', 'Frozen'), opt('T', 'Thawed')], default: 'Thawed' });
+      const frozen = f?.option === 'F';
+      c.doc.change('VPLAYER', () => {
+        const st = c.doc.layerState();
+        for (const l of st.list) if (names.includes(l.name)) { if (frozen) l.newVpFrozen = true; else delete l.newVpFrozen; }
+        c.doc.setLayerState(st);
+      });
+      c.doc.emitLayers();
+      c.print(t(frozen ? 'cmd.vplayer.dflt_frozen' : 'cmd.vplayer.dflt_thawed', { n: names.length }));
+      continue;
+    }
+    const w = await c.keyword(t('cmd.vplayer.where'), { options: [opt('A', 'All'), opt('S', 'Select'), opt('C', 'Current')], default: 'Current' });
+    const wk = w === 'Current' ? 'C' : w?.option;
+    let vps = [];
+    if (wk === 'A') vps = allVps();
+    else if (wk === 'S') {
+      for (;;) {
+        const pick = await c.entity(t('cmd.vplayer.pick'), { none: true });
+        if (!pick) break;
+        const e = map.get(pick.id);
+        if (e?.type === 'viewport') { if (!vps.includes(e)) vps.push(e); } else c.print(t('cmd.vpview.pick_viewport_border'));
+      }
+    } else { const v = current(); if (v) vps = [v]; }
+    if (!vps.length) { c.print(t('cmd.vplayer.none')); continue; }
+    c.doc.change('VPLAYER', () => {
+      for (const vp0 of vps) {
+        const vp = map.get(vp0.id);
+        if (!vp) continue;
+        let frz = (vp.frz || []).filter((n) => !names.some((x) => x.toUpperCase() === n.toUpperCase()));
+        if (key === 'F') frz = [...frz, ...names];
+        if (key === 'R') frz = [...frz, ...names.filter((n) => c.doc.layers.get(n)?.newVpFrozen)];
+        c.doc.update(vp.id, { ...vp, frz }, map);
+        if (!frz.length) { const n = { ...map.get(vp.id) }; delete n.frz; c.doc.update(vp.id, n, map); }
+      }
+    });
+    c.print(t('cmd.vplayer.done.' + { F: 'freeze', T: 'thaw', R: 'reset' }[key], { n: names.length, v: vps.length }));
+  }
+}, { help: () => t('cmd.vplayer.help') });
+
+// ---- MSPACE / PSPACE (0.5 VP.4): work on the model through a viewport of the open sheet, and back. The browser keeps
+// the state (view.js enterViewport); double-clicking inside a viewport / outside it does the same. ----
+def('MSPACE', ['MS'], async (c) => {
+  if (!c.host.enterViewport) { c.print(t('cmd.mspace.browser')); return; }
+  if (c.host.viewportEntered?.()) { c.print(t('cmd.mspace.already')); return; }
+  const lay = c.doc.layout;
+  if (!lay) { c.print(t('cmd.mspace.sheet_first')); return; }
+  const vps = c.doc.all().filter((e) => e.type === 'viewport' && e.on !== false);
+  if (!vps.length) { c.print(t('cmd.mspace.none')); return; }
+  let vp = [...c.host.selection].map((id) => c.doc.get(id)).find((e) => e?.type === 'viewport' && e.on !== false) || (vps.length === 1 ? vps[0] : null);
+  while (!vp) {
+    const p = await c.point(t('cmd.mspace.pick'));
+    vp = c.host.viewportAt?.(p) || null;
+    if (vp && vp.on === false) vp = null;
+    if (!vp) c.print(t('cmd.mspace.not_inside'));
+  }
+  c.host.setSelection(new Set());
+  c.host.enterViewport(vp);
+}, { noRepeat: true, help: () => t('cmd.mspace.help') });
+def('PSPACE', ['PS'], async (c) => {
+  if (!c.host.viewportEntered?.()) { c.print(t('cmd.pspace.not_inside')); return; }
+  c.host.leaveViewport();
+  c.print(t('cmd.pspace.done'));
+}, { noRepeat: true, help: () => t('cmd.pspace.help') });
+
+// ---- VIEWLABEL (0.5 WL.11): a view title or callout on a sheet that shows its viewport's view name as a live field: the text
+// carries `field: { k: 'vpview', vp }` and an edit hook rewrites it in the same undo step whenever that viewport's name changes.
+const viewLabelText = (vp) => (vp?.vname ? vp.vname : t('field.vpview.none'));
+Doc.editHooks.add((doc, ops) => {
+  for (const op of ops) {
+    if (!op.map || !(op.before?.type === 'viewport' || op.after?.type === 'viewport')) continue;
+    if (op.after && op.before && (op.after.vname || '') === (op.before.vname || '')) continue;
+    for (const e of [...op.map.values()]) {
+      if (e.type !== 'text' || e.field?.k !== 'vpview' || e.field.vp !== op.id) continue;
+      const s2 = op.after ? viewLabelText(op.after) : e.s;
+      if (s2 !== e.s) doc.update(e.id, { ...e, s: s2 }, op.map);
+    }
+  }
+});
+def('VIEWLABEL', ['VL'], async (c) => {
+  if (!c.doc.layout) { c.print(t('cmd.viewlabel.sheet')); return; }
+  let vp = [...c.host.selection].map((id) => c.doc.get(id)).find((e) => e?.type === 'viewport');
+  while (!vp) {
+    const pick = await c.entity(t('cmd.vpview.select_viewport'));
+    const e = c.doc.get(pick.id);
+    if (e.type === 'viewport') vp = e; else c.print(t('cmd.vpview.pick_viewport_border'));
+  }
+  c.host.setSelection(new Set());
+  const h = c.doc.current.textHeight || 2.5;
+  const s = viewLabelText(vp);
+  c.preview((cur) => [{ type: 'text', x: cur.x, y: cur.y, h, rot: 0, s, ha: 'left', va: 'baseline', wf: 1 }]);
+  const at = await c.point(t('cmd.viewlabel.where'), { none: true });
+  const p = at || { x: vp.x - vp.w / 2, y: vp.y - vp.h / 2 - h * 1.6 };
+  c.add(ent(c, { type: 'text', x: p.x, y: p.y, h, rot: 0, s, ha: 'left', va: 'baseline', wf: 1, field: { k: 'vpview', vp: vp.id } }));
+  if (!vp.vname) c.print(t('cmd.viewlabel.unnamed'));
+}, { help: () => t('cmd.viewlabel.help') });
 
 def('PLOT', ['PRINT', 'PUBLISH', 'EXPORTPDF'], async (c) => {
   if (!c.host.plot) { c.print(t('cmd.plot.plotting_needs_browser')); return; }
@@ -2621,7 +3146,8 @@ def('MEASUREGEOM', ['MEA'], async (c) => {
 
 def('ID', [], async (c) => {
   const p = await c.point(t('cmd.id.specify_point'));
-  c.print(t('cmd.id.result', { x: fmtLen(c, p.x), y: fmtLen(c, p.y) }));
+  const q = toUcs(activeUcs(c.doc), p);   // in the UCS (DR.8)
+  c.print(t('cmd.id.result', { x: fmtLen(c, q.x), y: fmtLen(c, q.y) }));
 }, { help: () => t('cmd.id.coordinates_point') });
 
 def('LIST', ['LI', 'LS'], async (c) => {
@@ -2648,6 +3174,7 @@ export function describe(e, units = null) {
     case 'hatch': return t('cmd.desc.hatch', { n: e.loops.length });
     case 'dim': { const kind = (DIM_KINDS[e.kind] || t('cmd.desc.dim.imported')).toLowerCase(); return !e.kind ? t('cmd.desc.dim.block', { kind, block: e.block }) : e.text ? t('cmd.desc.dim.text', { kind, value: formatMeasure(e), text: e.text }) : t('cmd.desc.dim', { kind, value: formatMeasure(e) }); }
     case 'viewport': return t('cmd.desc.viewport', { w: L(e.w), h: L(e.h), at: P(e), view: P({ x: e.cx, y: e.cy }), s: fmt(e.s) });
+    case 'xline': case 'ray': return t('cmd.desc.' + e.type, { at: P(e), angle: fmt(deg(normAngle(Math.atan2(e.dy, e.dx)))) });
     case 'mleader': return t('cmd.mld.describe', { s: oneLine(e.s || ''), at: P(e.pts[0]), n: e.pts.length });
     default: return '';
   }

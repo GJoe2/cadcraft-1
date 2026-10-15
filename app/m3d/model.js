@@ -1263,6 +1263,72 @@ export function followMe(def, fid, pathEids) {
 // Paint (0.4 M8): a colour on faces, and on placements of groups and components (it fills the faces inside that have none)
 
 export const isColor = (c) => typeof c === 'string' && /^#[0-9a-f]{6}$/i.test(c);
+/**
+ * Paint can also be a library material (0.5 RC.7, session render): 'mat:<id>' in the same `color` field, so every edit,
+ * undo, copy and file carries it as it carries a colour. Whatever turns paint into numbers asks paintHex(): a colour stays
+ * itself, a material gives its colour from afar (the app registers the library's colours with setMaterialColors; a build
+ * without the library, such as another app's copy of this kernel, shows a neutral grey). The views draw the texture.
+ */
+export const isMaterialPaint = (c) => typeof c === 'string' && /^mat:[a-z0-9][a-z0-9-]{0,39}$/.test(c);
+/**
+ * An imported texture (0.5 RC.11 (b): SketchUp, glTF): 'img:<id>|ux,uy,uz,u0,vx,vy,vz,v0|#rrggbb' — the image
+ * (Model.images), where it lies on the face (u = (ux, uy, uz)·p + u0, v = … in definition coordinates, metres; 1 = one copy
+ * of the image) and its colour from afar. All of it rides in the paint, so a face split, pushed, copied or undone keeps its
+ * texture where it was, and any copy of this kernel shows the colour without knowing the image.
+ */
+const NUM = '-?\\d+(?:\\.\\d+)?(?:e[-+]?\\d+)?';
+const IMG_RE = new RegExp('^img:[a-z0-9]{1,24}\\|(?:' + NUM + ',){7}' + NUM + '\\|(?:#[0-9a-f]{6})?$', 'i');
+export const isImagePaint = (c) => typeof c === 'string' && c.length <= 200 && IMG_RE.test(c);
+export const isPaint = (c) => isColor(c) || isMaterialPaint(c) || isImagePaint(c);
+let materialColor = () => null, imageColor = () => null;
+export function setMaterialColors(fn) { materialColor = typeof fn === 'function' ? fn : () => null; }
+export function setImageColors(fn) { imageColor = typeof fn === 'function' ? fn : () => null; }
+export function paintHex(c) {
+  if (isMaterialPaint(c)) return materialColor(c.slice(4)) || '#c8c4bc';
+  if (isImagePaint(c)) return c.slice(c.lastIndexOf('|') + 1) || imageColor(imageId(c)) || '#c8c4bc';
+  return c;
+}
+export const imageId = (c) => c.slice(4, c.indexOf('|'));
+/** Bytes → base64 (no DOM: Node and the page alike), for Model.addImage. */
+export function toBase64(u8) {
+  const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  let out = '';
+  for (let i = 0; i < u8.length; i += 3) {
+    const a = u8[i], b = u8[i + 1], c = u8[i + 2], n = (a << 16) | ((b ?? 0) << 8) | (c ?? 0);
+    out += A[(n >> 18) & 63] + A[(n >> 12) & 63] + (b === undefined ? '=' : A[(n >> 6) & 63]) + (c === undefined ? '=' : A[n & 63]);
+  }
+  return out;
+}
+const r7 = (x) => { const v = Number(x.toPrecision(7)); return Object.is(v, -0) ? 0 : v; };
+/** The paint for image `id` placed by u = U·p + U[3], v = V·p + V[3]; `avg` its colour from afar ('#rrggbb' | null). */
+export function imagePaint(id, U, V, avg = null) { return 'img:' + id + '|' + [...U, ...V].map(r7).join(',') + '|' + (isColor(avg) ? avg.toLowerCase() : ''); }
+/** Where point p (definition coordinates) falls on an image paint's texture: [u, v] in copies of the image. */
+export function imageUV(c, p) {
+  const k = c.split('|')[1].split(',').map(Number);
+  return [k[0] * p[0] + k[1] * p[1] + k[2] * p[2] + k[3], k[4] * p[0] + k[5] * p[1] + k[6] * p[2] + k[7]];
+}
+/**
+ * The image paint that puts texture coordinates `uvs` at the points `pts` of a flat face (normal n): the affine map
+ * u = U·p + u0 with U·n = 0, solved from the first three points that make a triangle. → paint | null (degenerate).
+ */
+export function imagePaintFit(id, pts, uvs, n, avg = null) {
+  for (let i = 0; i + 2 < pts.length; i++) for (let j = i + 1; j + 1 < pts.length; j++) for (let k = j + 1; k < pts.length; k++) {
+    const A = [[...pts[i], 1], [...pts[j], 1], [...pts[k], 1], [n[0], n[1], n[2], 0]];
+    const solve = (b) => {   // 4×4 Gaussian elimination with partial pivoting
+      const M = A.map((r, q) => [...r, b[q]]);
+      for (let c = 0; c < 4; c++) {
+        let piv = c; for (let r = c + 1; r < 4; r++) if (Math.abs(M[r][c]) > Math.abs(M[piv][c])) piv = r;
+        if (Math.abs(M[piv][c]) < 1e-12) return null;
+        [M[c], M[piv]] = [M[piv], M[c]];
+        for (let r = 0; r < 4; r++) if (r !== c) { const f = M[r][c] / M[c][c]; for (let q = c; q < 5; q++) M[r][q] -= f * M[c][q]; }
+      }
+      return M.map((r, q) => r[4] / r[q]);
+    };
+    const U = solve([uvs[i][0], uvs[j][0], uvs[k][0], 0]), V = solve([uvs[i][1], uvs[j][1], uvs[k][1], 0]);
+    if (U && V && [...U, ...V].every(Number.isFinite)) return imagePaint(id, U, V, avg);
+  }
+  return null;
+}
 /** Solid colours offered in the Colors panel: [name, #rrggbb]. */
 export const PALETTE = [
   ['White', '#f4f4f1'], ['Light gray', '#c9c9c5'], ['Gray', '#8a8a86'], ['Charcoal', '#3b3b3b'],   // i18n-ignore: palette ids (the app names them)
@@ -1270,14 +1336,14 @@ export const PALETTE = [
   ['Teal', '#138d85'], ['Sky', '#7fb8e6'], ['Blue', '#2b5fbd'], ['Purple', '#7d4ab0'],
   ['Pink', '#d9628f'], ['Brown', '#7a5236'], ['Wood', '#b98552'], ['Sand', '#d8c8a2'],
 ];
-/** Paint faces (ids in def) with colour c (null = the default). */
+/** Paint faces (ids in def) with colour or material c (null = the default). */
 export function paintFaces(def, fids, c) {
-  if (c !== null && !isColor(c)) throw new Error(t('m3d.model.that_is_not_a_colour'));
+  if (c !== null && !isPaint(c)) throw new Error(t('m3d.model.that_is_not_a_colour'));
   for (const id of fids) { const f = def.faces.get(id); if (!f) continue; if (c) f.color = c.toLowerCase(); else delete f.color; }
 }
 /** Paint a placement (instance iid in def): its faces without a colour of their own show c (null = the default). */
 export function paintInstance(def, iid, c) {
-  if (c !== null && !isColor(c)) throw new Error(t('m3d.model.that_is_not_a_colour'));
+  if (c !== null && !isPaint(c)) throw new Error(t('m3d.model.that_is_not_a_colour'));
   const inst = def.insts.get(iid);
   if (!inst) return;
   if (c) inst.color = c.toLowerCase(); else delete inst.color;
@@ -1509,11 +1575,47 @@ export function solidInfo(def) {
 // The model
 
 export class Model {
-  constructor() { this.reset(); }
+  constructor() {
+    // 0.5 RC.11 (b): textures that came with imported files, id → {name, mime, data (base64), avg '#rrggbb'}. Kept beside
+    // the model, not in it: undo never copies them (they are only ever added), and the app saves them with the file
+    // (imagesJSON / setImages). reset() leaves them; a new model clears them.
+    this.images = new Map();
+    this.reset();
+  }
+  /** Keep an imported image; the same bytes give the same id. → id */
+  addImage({ name = '', mime, data, avg = null }) {
+    if (!/^image\/(png|jpeg|webp)$/.test(mime) || typeof data !== 'string' || !/^[A-Za-z0-9+/]+=*$/.test(data) || data.length > 24e6) throw new Error(t('m3d.model.bad_image'));
+    for (const [id, im] of this.images) if (im.data === data) return id;
+    let h = 0; for (let i = 0; i < data.length; i += 97) h = (Math.imul(h, 31) + data.charCodeAt(i)) >>> 0;
+    let id = 't' + h.toString(36);
+    while (this.images.has(id)) id += 'x';
+    this.images.set(id, { name: cleanText(name, 120), mime, data, avg: isColor(avg) ? avg.toLowerCase() : null });
+    return id;
+  }
+  /** The images some face or placement still uses, for the file. */
+  imagesJSON() {
+    const used = new Set();
+    for (const d of this.defs.values()) {
+      for (const f of d.faces.values()) if (isImagePaint(f.color)) used.add(imageId(f.color));
+      for (const i of d.insts.values()) if (isImagePaint(i.color)) used.add(imageId(i.color));
+    }
+    return [...this.images].filter(([id]) => used.has(id)).map(([id, im]) => ({ id, ...im }));
+  }
+  /** Images from a file (untrusted): replaces the table. Bad entries are left out; at most 256 images, 96 MB. */
+  setImages(list) {
+    this.images.clear();
+    let total = 0;
+    for (const im of Array.isArray(list) ? list.slice(0, 256) : []) {
+      if (!im || typeof im.id !== 'string' || !/^[a-z0-9]{1,24}$/.test(im.id) || !/^image\/(png|jpeg|webp)$/.test(im.mime) || typeof im.data !== 'string' || !/^[A-Za-z0-9+/]+=*$/.test(im.data)) continue;
+      if ((total += im.data.length) > 96e6) break;
+      this.images.set(im.id, { name: cleanText(im.name, 120), mime: im.mime, data: im.data, avg: isColor(im.avg) ? im.avg.toLowerCase() : null });
+    }
+  }
 
   reset() {
     this.defs = new Map([['root', new Def('root', 'root', 'Model')]]);
     this.guides = new Map();
+    this.lights = new Map();      // 0.5 RC.11 (d): lamps, id → cleanLight shape (world coordinates); renders use them
     this.dims = new Map();
     // 0.4 M7: section planes, id → {p, n, name?}: n points at the side the plane cuts away. One is active (its cut
     // shows) or none; sectionView = {planes, cuts}: whether the planes and the active cut show (saved when off)
@@ -1660,6 +1762,18 @@ export class Model {
     this.undoStack.push(s);
     this.version++; this.dirty = true;
     return s.label;
+  }
+  /** The newest undo step (a tool keeps it to amend it), or null. */
+  lastStep() { return this.undoStack[this.undoStack.length - 1] || null; }
+  /** Do the newest undo step again as fn(model) from its own start (push/pull: a distance typed after the click). False — and
+   *  nothing changed — when `step` is no longer the newest, a preview is open, or fn throws. */
+  amendLast(step, fn) {
+    if (!step || this.lastStep() !== step || this._base !== null) return false;
+    this.restore(step.before);
+    try { fn(this); } catch (e) { this.restore(step.after); this.version++; return false; }
+    step.after = this.snapshot();
+    this.redoStack = []; this.dirty = true; this.version++;
+    return true;
   }
   /** Live previews (push/pull drag, move): begin → preview(fn)… → commit(label) | abort(). */
   begin() { this._base = this.snapshot(); }
@@ -1960,6 +2074,11 @@ export class Model {
     return this.explode(ctx.def, iid);
   }
 
+  // ---- lights (0.5 RC.11 (d)): lamps for rendered pictures — point, spot (aimed), area (a glowing rectangle) ----
+  addLight(o) { const L = cleanLight(o); if (!L) throw new Error(t('m3d.model.bad_light')); const id = this.newGuideId(); this.lights.set(id, L); return id; }
+  setLight(id, patch) { const L = this.lights.get(id); if (!L) return false; const n = cleanLight({ ...L, ...patch }); if (!n) throw new Error(t('m3d.model.bad_light')); this.lights.set(id, n); return true; }
+  deleteLight(id) { return this.lights.delete(id); }
+
   // ---- guides ----
   addGuideLine(p, d) { const id = this.newGuideId(); this.guides.set(id, { kind: 'line', p: p.slice(), d: norm(d) }); return id; }
   addGuidePoint(p) { const id = this.newGuideId(); this.guides.set(id, { kind: 'point', p: p.slice() }); return id; }
@@ -2131,6 +2250,7 @@ export class Model {
       format: FORMAT, version: VERSION, units: this.units, nextId: this.nextId,
       defs: [...this.defs.values()].map(defToJSON),
       guides: [...this.guides].map(([id, g]) => ({ id, ...g })),
+      ...(this.lights.size ? { lights: [...this.lights].map(([id, L]) => ({ id, ...structuredLight(L) })) } : {}),
       ...(this.sections.size ? { sections: [...this.sections].map(([id, s]) => ({ id, p: s.p.slice(), n: s.n.slice(), name: s.name })), activeSection: this.activeSection } : {}),
       ...(this.sectionView.planes && this.sectionView.cuts ? {} : { sectionView: { ...this.sectionView } }),
       ...(this.axesM ? { axes: this.axesM.slice() } : {}),
@@ -2213,9 +2333,15 @@ export class Model {
     for (const id of defs.keys()) if (id !== 'root') maxId = Math.max(maxId, +id.slice(1));
     for (const id of guides.keys()) maxId = Math.max(maxId, id);
     for (const id of dims.keys()) maxId = Math.max(maxId, id);
+    const lights = new Map();
+    for (const o of Array.isArray(j.lights) ? j.lights.slice(0, 1000) : []) {
+      if (!o || !Number.isInteger(o.id) || o.id < 1 || guides.has(o.id) || dims.has(o.id) || lights.has(o.id)) continue;
+      const L = cleanLight(o);
+      if (L) { lights.set(o.id, L); maxId = Math.max(maxId, o.id); }
+    }
     const sections = new Map();
     for (const s of Array.isArray(j.sections) ? j.sections.slice(0, 1000) : []) {
-      if (!s || !Number.isInteger(s.id) || guides.has(s.id) || dims.has(s.id) || sections.has(s.id) || !isPt(s.p) || !isPt(s.n) || !(len(s.n) > 1e-9)) continue;
+      if (!s || !Number.isInteger(s.id) || guides.has(s.id) || dims.has(s.id) || lights.has(s.id) || sections.has(s.id) || !isPt(s.p) || !isPt(s.n) || !(len(s.n) > 1e-9)) continue;
       sections.set(s.id, { p: s.p.slice(), n: norm(s.n), name: cleanText(s.name, 80) || t('m3d.section.name', { n: sections.size + 1 }) });
       maxId = Math.max(maxId, s.id);
     }
@@ -2231,6 +2357,7 @@ export class Model {
     }
     this.defs = defs;
     this.guides = guides;
+    this.lights = lights;
     this.dims = dims;
     this.scenes = scenes;
     this.tags = [];
@@ -2252,6 +2379,26 @@ const newUid = () => Date.now().toString(36) + '-' + Math.random().toString(36).
 export const STYLE_MODES = ['shaded', 'hidden', 'wire', 'xray'];
 const isNum = (x) => typeof x === 'number' && Number.isFinite(x) && Math.abs(x) < 1e7;
 const isPt = (p) => Array.isArray(p) && p.length === 3 && p.every(isNum);
+
+/**
+ * A light (0.5 RC.11 (d)) from anything (a file, the panel): {kind 'point'|'spot'|'area', p (metres, world), dir (unit:
+ * where a spot points / which way an area light faces), color '#rrggbb', lumens 1…200000, angle (a spot's cone, full,
+ * degrees 5…170), size [w, h] (an area light, metres 0.02…20; a point or spot lamp's bulb uses size[0] as its diameter, so
+ * its shadows soften), on, name}. → a fresh object | null.
+ */
+export const LIGHT_KINDS = ['point', 'spot', 'area'];
+export function cleanLight(o) {
+  if (!o || typeof o !== 'object' || !LIGHT_KINDS.includes(o.kind) || !isPt(o.p)) return null;
+  const clamp = (x, lo, hi, d) => (isNum(x) ? Math.min(hi, Math.max(lo, x)) : d);
+  let dir = isPt(o.dir) && len(o.dir) > 1e-9 ? norm(o.dir) : [0, 0, -1];
+  const size = Array.isArray(o.size) && o.size.length === 2 ? [clamp(o.size[0], 0.02, 20, 0.6), clamp(o.size[1], 0.02, 20, 0.6)] : (o.kind === 'area' ? [0.6, 0.6] : [0.06, 0.06]);
+  return {
+    kind: o.kind, p: o.p.slice(), dir, color: isColor(o.color) ? o.color.toLowerCase() : '#ffe7c4',
+    lumens: Math.round(clamp(o.lumens, 1, 200000, 800)), angle: Math.round(clamp(o.angle, 5, 170, 60)), size,
+    on: o.on !== false, name: cleanText(o.name, 80),
+  };
+}
+function structuredLight(L) { return { ...L, p: L.p.slice(), dir: L.dir.slice(), size: L.size.slice() }; }
 export function cleanText(s, max = 200) {
   if (typeof s !== 'string') return '';
   // eslint-disable-next-line no-control-regex
@@ -2341,13 +2488,13 @@ function defFromJSON(d, j, fail = (m) => { throw new Error(m); }) {
     if (loops.some((l) => l.length < 3 || l.some((v) => !d.verts.has(v)))) fail(t('m3d.model.a_face_is_wrong'));
     max = Math.max(max, f.id);
     d.next = Math.max(d.next, max + 1);
-    fAdd(d, loops.map((l) => l.slice()), isColor(f.color) ? f.color.toLowerCase() : undefined, f.id, f.hidden === true);
+    fAdd(d, loops.map((l) => l.slice()), isPaint(f.color) ? f.color.toLowerCase() : undefined, f.id, f.hidden === true);
   }
   for (const i of Array.isArray(j.insts) ? j.insts : []) {
     if (!i || !intId(i.id) || typeof i.def !== 'string' || !Array.isArray(i.m) || i.m.length !== 16 || !i.m.every(isNum)) fail(t('m3d.model.an_instance_is_wrong'));
     const ins = { def: i.def, m: i.m.slice() };
     if (i.name) ins.name = cleanText(i.name, 120);
-    if (isColor(i.color)) ins.color = i.color.toLowerCase();
+    if (isPaint(i.color)) ins.color = i.color.toLowerCase();
     if (i.hidden === true) ins.hidden = true;
     if (typeof i.tag === 'string' && cleanText(i.tag, 80)) ins.tag = cleanText(i.tag, 80);
     if (i.rule && typeof i.rule === 'object') {

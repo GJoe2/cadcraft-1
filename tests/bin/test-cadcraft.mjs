@@ -1824,6 +1824,655 @@ section('Layouts and viewports');
 }
 
 // ---------------------------------------------------------------------------
+section('Entering a viewport: MSPACE, PSPACE, pan and zoom through it (0.5 VP.4; view.js without a canvas)');
+{
+  const { View } = await load('view.js');
+  const { doc, type, host, log } = harness();
+  await type('REC', '0,0', '10000,5000');
+  doc.meta.units = 'millimeters';
+  await type('LAYOUT');
+  const lay = doc.layout;
+  const vp = [...lay.entities.values()].find((e) => e.type === 'viewport');
+  // a View without canvases: the coordinate and state methods only
+  const v = Object.assign(Object.create(View.prototype), { doc, cx: 210, cy: 148.5, zoom: 2, w: 1000, h: 700, x0: 0, y0: 0, views: new WeakMap(), state: { selection: new Set() }, invalidate() {} });
+  doc.on((kind) => { if (kind === 'change' && v.entered) v.syncEntered(); });
+  host.viewportAt = (p) => [...doc.entities.values()].filter((e) => e.type === 'viewport' && Math.abs(p.x - e.x) <= e.w / 2 && Math.abs(p.y - e.y) <= e.h / 2).pop() || null;   // topmost, as cadcraft.js
+  host.enterViewport = (e) => v.enterViewport(e);
+  host.leaveViewport = () => { const pv = v.pendingViewport(); if (pv) doc.change('Viewport view', () => doc.update(pv.vp.id, { ...pv.vp, cx: pv.cx, cy: pv.cy, s: pv.s }, pv.lay.entities)); v.leaveViewport(); };
+  host.viewportEntered = () => v.enteredViewport()?.vp || null;
+  host.onCommand = (name) => { if (name && !['UNDO', 'U', 'REDO'].includes(name)) { const pv = v.pendingViewport(); if (pv) { doc.change('Viewport view', () => doc.update(pv.vp.id, { ...pv.vp, cx: pv.cx, cy: pv.cy, s: pv.s }, pv.lay.entities)); v.entered.base = { cx: pv.cx, cy: pv.cy, s: pv.s }; } } };   // as cadcraft.js commitViewport
+  const paperOf = (q) => { const P = v.paperView(); return { x: (q.x - P.cx) * P.zoom + v.w / 2, y: v.h / 2 - (q.y - P.cy) * P.zoom }; };
+  const M0 = G.viewportMatrix(vp);
+  await type('MSPACE');
+  ok(v.entered && doc.inModel && host.viewportEntered()?.id === vp.id, 'MSPACE on a sheet with one viewport enters it: the doc works on the model');
+  const probe = { x: 1234, y: 2345 }, viaVp = paperOf(G.mApply(M0, probe)), direct = v.toScreen(probe.x, probe.y);
+  ok(nearPt(direct, viaVp.x, viaVp.y, 1e-6), 'a model point lands on screen where the viewport shows it on the sheet', JSON.stringify({ direct, viaVp }));
+  await type('L', '100,100', '900,100', '');
+  ok(doc.model.size === 2 && [...doc.model.values()].some((e) => e.type === 'line' && near(e.x2, 900)) && ![...lay.entities.values()].some((e) => e.type === 'line' && near(e.x2, 900)), 'LINE inside the viewport draws in the model, in model units');
+  // pan and zoom (not locked): the sheet stays put, the viewport's view changes
+  const P0 = { ...v.paperView() }, frame0 = v.enteredFrame();
+  v.zoomAt(500, 350, 2); v.panBy(40, -10);
+  ok(near(v.paperView().zoom, P0.zoom) && near(v.paperView().cx, P0.cx) && nearPt(v.enteredFrame()[2], frame0[2].x, frame0[2].y), 'zoom and pan inside: the sheet and the frame stay where they are');
+  const pv = v.pendingViewport();
+  ok(pv && near(pv.s, vp.s * 2), 'the viewport\'s scale follows the zoom (×2)', JSON.stringify(pv && { s: pv.s, was: vp.s }));
+  const steps = doc.undoStack.length;
+  await type('PSPACE');
+  const vpNow = doc.get(vp.id);
+  ok(!v.entered && doc.layout === lay && vpNow && near(vpNow.s, vp.s * 2), 'PSPACE goes back to the sheet and writes the viewport\'s new view', JSON.stringify(vpNow && { s: vpNow.s }));
+  ok(doc.undoStack.length === steps + 1 && doc.undoStack[doc.undoStack.length - 1].label === 'Viewport view', 'the new view is one undo step ("Viewport view")', doc.undoStack[doc.undoStack.length - 1]?.label);
+  ok(near(v.zoom, P0.zoom) && near(v.cx, P0.cx), 'back on the sheet at the paper view it had');
+  doc.undo();
+  ok(near(doc.get(vp.id).s, vp.s), 'undo puts the viewport\'s old view back');
+  // a model point picked inside after re-entering lands on the model under that spot of the sheet
+  await type('MS');
+  const spot = G.mApply(G.viewportMatrix(lay.entities.get(vp.id)), { x: 5000, y: 2500 });
+  const sp = paperOf(spot), wpt = v.toWorld(sp.x, sp.y);
+  ok(nearPt(wpt, 5000, 2500, 1e-6), 'a click on the sheet inside the frame is the model point the viewport shows there', JSON.stringify(wpt));
+  // undo of an edit to the viewport while inside: the view follows (syncEntered)
+  await type('PS');
+  doc.change('scale', () => doc.update(vp.id, { ...doc.get(vp.id), s: vp.s }));
+  await type('MS');
+  const z1 = v.zoom;
+  doc.change('rescale', () => doc.update(vp.id, { ...lay.entities.get(vp.id), s: vp.s * 4 }, lay.entities));
+  ok(near(v.zoom, z1 * 4), 'a scale changed while inside (Properties): the view follows at once');
+  doc.undo();
+  ok(near(v.zoom, z1), 'and undoing it brings the view back');
+  await type('PS');
+  // a locked viewport: pan and zoom move the sheet, the viewport keeps its view
+  const vl = doc.get(vp.id);
+  doc.change('lock', () => doc.update(vl.id, { ...vl, locked: true }));
+  await type('MS');
+  const Pl0 = { ...v.paperView() };
+  v.zoomAt(500, 350, 1.5);
+  ok(near(v.paperView().zoom, Pl0.zoom * 1.5) && v.pendingViewport() === null, 'locked: zoom inside zooms the sheet; the viewport keeps its view (nothing to write)');
+  await type('PS');
+  ok(near(doc.get(vp.id).s, vl.s) && near(v.zoom, Pl0.zoom * 1.5), 'locked: PSPACE leaves the viewport as it was, the sheet at the new zoom');
+  // two viewports, nothing selected: MSPACE asks for a point inside one; frozen layers there are not picked
+  doc.change('unlock', () => doc.update(vl.id, { ...doc.get(vl.id), locked: false }));
+  await type('MV', '300,200', '400,280');
+  const vp2 = [...lay.entities.values()].filter((e) => e.type === 'viewport')[1];
+  host.selection = new Set();
+  await type('MSPACE', '5,5');
+  ok(log.includes(EN('cmd.mspace.not_inside')) && !v.entered, 'MSPACE with two viewports: a point outside both is refused, and it asks again');
+  await type('350,240');
+  ok(v.entered && host.viewportEntered()?.id === vp2.id, '… a point inside the second one enters that one');
+  doc.addLayer({ name: 'Hidden here' });
+  doc.change('frz', () => doc.update(vp2.id, { ...lay.entities.get(vp2.id), frz: ['Hidden here'] }, lay.entities));
+  doc.change('obj', () => doc.add({ type: 'circle', layer: 'Hidden here', cx: 5000, cy: 2500, r: 300 }, doc.model));
+  const circ = doc.all().find((e) => e.type === 'circle');
+  v.ensureCache = () => ({ bounds: new Map(doc.all().map((e) => [e.id, G.entityBounds(e, doc.blocks)])) });
+  v.cursorSpec = () => ({ pick: 6 });
+  ok(v.pick({ x: 5300, y: 2500 }, 50) === null && v.pickWindow({ minX: 4000, minY: 1000, maxX: 6000, maxY: 4000 }, true).every((id) => id !== circ.id), 'objects on a layer frozen in the entered viewport are neither picked nor windowed');
+  await type('PS');
+  ok(!v.entered && doc.layout === lay, 'PS leaves the second viewport too');
+  await type('PS');
+  ok(log.includes(EN('cmd.pspace.not_inside')), 'PSPACE when not inside a viewport says so');
+  doc.setSpace(null);
+  await type('MSPACE');
+  ok(log.includes(EN('cmd.mspace.sheet_first')), 'MSPACE on the Model tab says a sheet comes first');
+}
+
+// ---------------------------------------------------------------------------
+section('Freezing layers in one viewport: VPLAYER, frozen in new viewports (0.5 VP.2)');
+{
+  const { doc, type, host, log, click } = harness();
+  await type('REC', '0,0', '1000,500');
+  doc.change('lay', () => { doc.addLayer({ name: 'A-Wall' }); doc.addLayer({ name: 'A-Door' }); doc.addLayer({ name: 'E-Light' }); });
+  await type('LAYOUT');
+  await type('MV', '300,200', '400,280');
+  const vps = () => [...doc.layout.entities.values()].filter((e) => e.type === 'viewport');
+  const [v1, v2] = vps();
+  host.selection = new Set([v2.id]);
+  const steps = doc.undoStack.length;
+  await type('VPLAYER', 'F', 'A-*', 'C', '');
+  ok(JSON.stringify([...doc.get(v2.id).frz].sort()) === '["A-Door","A-Wall"]' && !doc.get(v1.id).frz, 'VPLAYER Freeze "A-*" Current: both A- layers frozen in the selected viewport only', JSON.stringify(doc.get(v2.id).frz));
+  ok(doc.undoStack.length === steps + 1, 'one undo step');
+  await type('VPLAYER', 'T', 'a-door', 'A', '');
+  ok(JSON.stringify(doc.get(v2.id).frz) === '["A-Wall"]', 'Thaw by name (any case) in All viewports');
+  await type('VPLAYER', 'V', 'E-Light', 'F', '');
+  ok(doc.layers.get('E-Light').newVpFrozen === true, 'Vpvisdflt Frozen: the layer is frozen in new viewports');
+  await type('MV', '50,50', '150,120');
+  const v3 = vps().pop();
+  ok(JSON.stringify(v3.frz) === '["E-Light"]', 'MVIEW starts the new viewport with that layer frozen');
+  await type('VPLAYER', 'R', 'E-Light', 'S'); await click(50, 85); await type('', '');
+  ok(JSON.stringify(doc.get(v3.id).frz) === '["E-Light"]' && log.some((l) => /reset/.test(l)), 'Reset puts each picked viewport back to the default (frozen here)');
+  await type('VPLAYER', 'R', 'A-Wall', 'A', '');
+  ok(!doc.get(v2.id).frz, 'Reset of a layer not frozen in new viewports: thawed (the list empty → gone)', JSON.stringify(doc.get(v2.id)));
+  await type('VPLAYER', 'F', 'nope*', 'C', '');
+  ok(log.some((l) => l.includes('No layer matches')), 'no matching layer: said');
+  doc.undo(); doc.undo();
+  ok(JSON.stringify(doc.get(v2.id).frz) === '["A-Wall"]', 'undo brings the freezes back');
+  const d2 = new Doc(); d2.load({ layers: [{ name: 'X', newVpFrozen: true }, { name: 'Y' }] });
+  ok(d2.layers.get('X').newVpFrozen === true && !('newVpFrozen' in d2.layers.get('Y')), 'a file\'s "frozen in new viewports" layer flag is kept (doc.load)');
+}
+
+// ---------------------------------------------------------------------------
+section('Sheet numbers on the tabs (0.5 WL.9; sheetnum.js)');
+{
+  const { sheetNumberOf } = await load('sheetnum.js');
+  const cases = [['A-101 Ground floor plan', 'A-101'], ['A1.01 Plan', 'A1.01'], ['S-2.3', 'S-2.3'], ['E101 Lighting', 'E101'], ['M-201A HVAC', 'M-201A'], ['12 - Roof', '12'], ['Layout1', null], ['Sheet 3', null], ['', null]];
+  ok(cases.every(([n, w]) => sheetNumberOf(n) === w), 'the first word when it reads like a sheet number, else none', JSON.stringify(cases.map(([n]) => sheetNumberOf(n))));
+  ok(sheetNumberOf('Layout1', { sheets: [{ layout: 'Layout1', number: 'P-1' }] }) === 'P-1' && sheetNumberOf('A-101 Plan', { sheets: [{ layout: 'A-101 Plan', number: '' }] }) === 'A-101', 'the open sheet set\'s number wins when it has one');
+}
+
+// ---------------------------------------------------------------------------
+section('Sheet numbers from fields (0.5 WL.10; sheetset.js numberByRule)');
+{
+  const SS = await load('sheetset.js');
+  let set = SS.newSheetSet('Clinic');
+  set = SS.setProperties(set, { DISCIPLINE: 'A' });
+  const add = (layout, props) => { set = SS.addSheet(set, { file: 'a.dwg', layout, number: '', title: layout, properties: props }).set; };
+  add('L1 plan', { LEVEL: '1' }); add('L1 RCP', { LEVEL: '1' }); add('L2 plan', { LEVEL: '2' }); add('Site', { DISCIPLINE: 'C', LEVEL: '0' });
+  ok(SS.ruleProblem('{DISCIPLINE}-{LEVEL}') === 'sheetset.rule.seq' && SS.ruleProblem('') === 'sheetset.rule.empty' && SS.ruleProblem('{DISCIPLINE}-{LEVEL}{SEQ:2}') === null, 'ruleProblem: a rule needs {SEQ}');
+  set = SS.numberByRule(set, { rule: '{DISCIPLINE}-{LEVEL}{SEQ:2}', start: 1, auto: true });
+  const nums = () => SS.allSheets(set).map((x) => x.sheet.number).join(' ');
+  ok(nums() === 'A-101 A-102 A-201 C-001', 'sheet fields first, then the set\'s; the sequence counts per discipline + level', nums());
+  const id = SS.allSheets(set)[1].sheet.id;
+  set = SS.numberByRule(SS.updateSheet(set, id, { properties: { LEVEL: '2' } }));
+  ok(nums() === 'A-101 A-201 A-202 C-001', 'a field changes (L1 RCP moves to level 2): the rule renumbers', nums());
+  const back = SS.readSheetSet(SS.writeSheetSet(set)).set;
+  ok(back.numbering?.rule === '{DISCIPLINE}-{LEVEL}{SEQ:2}' && back.numbering.auto === true && back.numbering.start === 1, 'the rule is saved in the .ccsheets file and read back');
+  ok(!SS.readSheetSet(SS.writeSheetSet({ ...set, numbering: { rule: 'no seq', auto: true } })).set.numbering, 'a rule without {SEQ} in a file is dropped');
+  set = SS.addSubset(set, 'Details').set || set;
+  ok(SS.numberByRule(set, { rule: '{SUBSET}{SEQ}', start: 5 }) && SS.allSheets(SS.numberByRule(set, { rule: 'X{SEQ:3}', start: 5 })).map((x) => x.sheet.number)[0] === 'X005', '{SEQ:3} pads and counts from the start number');
+}
+
+// ---------------------------------------------------------------------------
+section('Compare settings (0.5 WL.12; compare.js)');
+{
+  const C = await load('compare.js');
+  const a = new Doc(), b = new Doc();
+  a.load({ layers: [{ name: '0', color: 7 }, { name: 'Walls', color: 1, lineweight: 0.5 }], dimStyles: [['ISO', { txt: 2.5, asz: 2.5 }], ['Arch', { txt: 3, asz: 2.5 }]], textStyles: [['Notes', { font: 'Arial', h: 2.5, wf: 1, obl: 0 }]], meta: { units: 'millimeters', lunits: 2, luprec: 2 } });
+  b.load({ layers: [{ name: '0', color: 7 }, { name: 'Walls', color: 5, lineweight: 0.5 }], dimStyles: [['ISO', { txt: 3.5, asz: 2.5 }]], meta: { units: 'inches', lunits: 4, luprec: 4 } });
+  ok(C.itemsOf(a, 'dimstyle').join() === '*CURRENT,ISO,Arch' && C.itemsOf(a, 'layer').join() === '0,Walls', 'itemsOf: styles (with the settings for new dimensions) and layers (0 first)');
+  const two = C.compareItems('dimstyle', a, 'ISO', a, 'Arch');
+  ok(two.find((r) => r.key === 'txt') && !two.find((r) => r.key === 'txt').same && two.find((r) => r.key === 'asz').same, 'two styles in one drawing: text height differs, arrow size the same');
+  const lay = C.compareItems('layer', a, 'Walls', b, 'Walls');
+  ok(!lay.find((r) => r.key === 'color').same && lay.find((r) => r.key === 'lineweight').same, 'a layer in two drawings: colour differs, lineweight the same');
+  const steps = b.undoStack.length;
+  ok(C.copyValue(b, 'layer', 'Walls', 'color', 1) && b.layers.get('Walls').color === 1 && b.undoStack.length === steps + 1, 'copying a value across: the other drawing changes, in one undo step');
+  b.undo();
+  ok(b.layers.get('Walls').color === 5, 'and its undo puts it back');
+  ok(C.copyValue(b, 'dimstyle', 'Arch', 'txt', 3) && b.dimStyles.get('Arch')?.txt === 3, 'copying onto a style the other drawing lacks makes it');
+  b.undo();
+  ok(!b.dimStyles.has('Arch'), 'undo removes it again (setStyle is undoable)');
+  ok(!C.copyValue(b, 'layer', '0', 'color', 7), 'copying a value that is already there changes nothing');
+  ok(C.copyValue(b, 'units', '*DRAWING', 'lunits', 2) && b.meta.lunits === 2, 'units: a drawing setting copied');
+  ok(C.copyValue(b, 'textstyle', 'Notes', 'font', 'Arial') && b.textStyles.get('Notes').font === 'Arial', 'text styles too');
+  ok(C.valueText('sheet', 'size', [420, 297]) === '420 × 297' && C.valueText('layer', 'on', true) === '✓' && C.valueText('x', 'y', undefined) === '—', 'valueText');
+}
+
+// ---------------------------------------------------------------------------
+section('Tangent object snap, deferred (0.5 DR.3)');
+{
+  const c1 = { cx: 0, cy: 0, r: 5 }, c2 = { cx: 20, cy: 0, r: 5 };
+  const tf = G.tangentFrom({ x: 10, y: 0 }, c1);
+  ok(tf.length === 2 && tf.every((q) => near(Math.hypot(q.x, q.y), 5) && near((q.x - 10) * q.x + q.y * q.y, 0)), 'tangentFrom: two touch points, the radius square to the line');
+  ok(G.tangentFrom({ x: 1, y: 0 }, c1).length === 0, 'from inside: none');
+  const ct = G.commonTangents(c1, c2);
+  ok(ct.length === 4 && ct.every(([a, b]) => near(Math.hypot(a.x, a.y), 5) && near(Math.hypot(b.x - 20, b.y), 5)), 'commonTangents: four lines for two apart circles of the same size (outer and inner)');
+  const r = G.resolveTangent({ c: c1, near: { x: 0, y: 6 } }, { tan: { c: c2, near: { x: 20, y: 6 } } });
+  ok(r && near(r[0].y, 5) && near(r[1].y, 5) && near(r[0].x, 0) && near(r[1].x, 20), 'two deferred tangents picked on top: the top outer tangent y = 5', JSON.stringify(r));
+  const sn = G.snapPoints({ type: 'circle', cx: 0, cy: 0, r: 5 }, { x: 2.6, y: 4.2 }, 1, new Set(['tan']), null, { x: 10, y: 0 });
+  ok(sn.some((q) => q.kind === 'tan' && near(q.x, 2.5) && near(q.y, 4.330127, 1e-5)), 'with a base point the Tangent snap is the touch point from it');
+  const sd = G.snapPoints({ type: 'circle', cx: 0, cy: 0, r: 5 }, { x: 0.2, y: 5.1 }, 1, new Set(['tan']), null, null);
+  ok(sd.length === 1 && sd[0].defer && near(sd[0].defer.r, 5), 'without one it is deferred (the circle is kept for later)');
+  const { doc, type, eng } = harness();
+  await type('L');
+  eng.click({ x: 0, y: 5, tan: { c: c1, near: { x: 0, y: 6 } } }); await new Promise((q) => setTimeout(q, 0));
+  eng.click({ x: 20, y: 5, tan: { c: c2, near: { x: 20, y: 6 } } }); await new Promise((q) => setTimeout(q, 0));
+  await type('');
+  const ln = doc.all()[0];
+  ok(doc.all().length === 1 && near(ln.y1, 5) && near(ln.y2, 5) && near(ln.x1, 0) && near(ln.x2, 20), 'LINE from Tangent to Tangent: the line touching both circles', JSON.stringify(ln));
+  await type('L');
+  eng.click({ x: 0, y: 5, tan: { c: c1, near: { x: 0, y: 6 } } }); await new Promise((q) => setTimeout(q, 0));
+  await type('10,0', '');
+  const l2 = doc.all()[1];
+  ok(l2 && near(Math.hypot(l2.x1, l2.y1), 5) && near(l2.x1, 2.5) && l2.y1 > 0 && near(l2.x2, 10), 'LINE from Tangent to a point: the touch point on the picked side', JSON.stringify(l2));
+}
+
+// ---------------------------------------------------------------------------
+section('Tangent circles: CIRCLE TTR and Tan Tan Tan (0.5 DR.1, DR.2; tancircle.js)');
+{
+  const T = await load('tancircle.js');
+  const L = (x1, y1, x2, y2) => { const l = Math.hypot(x2 - x1, y2 - y1); return { k: 'L', x: x1, y: y1, dx: (x2 - x1) / l, dy: (y2 - y1) / l }; };
+  const C = (cx, cy, r) => ({ k: 'C', cx, cy, r });
+  const eq = (k, x, y, r, tol = 1e-6) => !!k && near(k.cx, x, tol) && near(k.cy, y, tol) && near(k.r, r, tol);
+  ok(eq(T.circleTTR(L(0, 0, 10, 0), { x: 5, y: 0 }, L(0, 0, 0, 10), { x: 0, y: 5 }, 2), 2, 2, 2), 'TTR line–line: r 2 in the corner picked');
+  ok(eq(T.circleTTR(L(0, 0, 10, 0), { x: 5, y: 0 }, L(0, 0, 0, -10), { x: 0, y: -5 }, 2), 2, -2, 2), '… the other corner when the picks are there');
+  ok(eq(T.circleTTR(L(-20, 0, 20, 0), { x: 3, y: 0 }, C(0, 10, 5), { x: 2, y: 5.5 }, 3), Math.sqrt(64 - 49), 3, 3), 'TTR line–circle: centre 3 above the line and 8 from the circle\'s centre, on the picked side', JSON.stringify(T.circleTTR(L(-20, 0, 20, 0), { x: 3, y: 0 }, C(0, 10, 5), { x: 2, y: 5.5 }, 3)));
+  const out = T.circleTTR(C(0, 0, 5), { x: 4, y: 3 }, C(20, 0, 5), { x: 16, y: 3 }, 6);
+  ok(eq(out, 10, Math.sqrt(121 - 100), 6), 'TTR circle–circle outside: touching both from outside', JSON.stringify(out));
+  const ins = T.circleTTR(C(0, 0, 20), { x: 0, y: 19 }, C(0, 12, 3), { x: 0, y: 15.2 }, 4);
+  ok(ins && near(Math.hypot(ins.cx, ins.cy), 16, 1e-6) && near(Math.hypot(ins.cx, ins.cy - 12), 7, 1e-6), 'TTR circle–circle inside: inside the big one, outside the small one', JSON.stringify(ins));
+  ok(T.circleTTR(C(0, 0, 5), { x: 4, y: 3 }, C(40, 0, 5), { x: 36, y: 3 }, 6) === null, 'TTR too far apart for the radius: none (Circle does not exist)');
+  ok(eq(T.circleTTT(L(0, 0, 10, 0), { x: 3, y: 0 }, L(0, 0, 0, 10), { x: 0, y: 3 }, L(10, 0, 0, 10), { x: 5, y: 5 }), 10 - Math.SQRT2 * 5, 10 - Math.SQRT2 * 5, 10 - Math.SQRT2 * 5), 'TTT three lines picked on the triangle\'s sides: the incircle');
+  const ex = T.circleTTT(L(0, 0, 10, 0), { x: 14, y: 0 }, L(0, 0, 0, 10), { x: 0, y: 14 }, L(10, 0, 0, 10), { x: 7, y: 3 });
+  ok(ex && ex.r > 10 && ex.cx > 10 && ex.cy > 10, 'TTT three lines picked outside past the corners: an excircle', JSON.stringify(ex));
+  const tc = T.circleTTT(C(0, 0, 1), { x: 0.6, y: 0.8 }, C(10, 0, 1), { x: 9.4, y: 0.8 }, C(5, 8, 1), { x: 5, y: 7 });
+  ok(tc && [C(0, 0, 1), C(10, 0, 1), C(5, 8, 1)].every((o) => { const d = Math.hypot(tc.cx - o.cx, tc.cy - o.cy); return near(d, tc.r + 1, 1e-6) || near(d, Math.abs(tc.r - 1), 1e-6); }), 'TTT three circles: touching each one, on the sides picked', JSON.stringify(tc));
+  const mix = T.circleTTT(L(-20, 0, 20, 0), { x: 0, y: 0 }, C(-6, 6, 2), { x: -4, y: 6 }, C(6, 6, 2), { x: 4, y: 6 });
+  ok(mix && near(Math.abs(mix.cy), mix.r, 1e-6) && near(Math.hypot(mix.cx + 6, mix.cy - 6), mix.r + 2, 1e-6) && near(Math.hypot(mix.cx - 6, mix.cy - 6), mix.r + 2, 1e-6), 'TTT a line and two circles', JSON.stringify(mix));
+  ok(T.circleTTT(L(0, 0, 10, 0), { x: 3, y: 0 }, L(0, 5, 10, 5), { x: 3, y: 5 }, L(0, 10, 10, 10), { x: 5, y: 10 }) === null, 'TTT three parallel lines: none');
+  // the commands, by picks
+  const { doc, type, click, log } = harness();
+  await type('L', '0,0', '100,0', '', 'L', '0,0', '0,100', '');
+  await type('C', 'T'); await click(50, 0); await click(0, 50); await type('10');
+  let cs = doc.all().filter((e) => e.type === 'circle');
+  ok(cs.length === 1 && eq(cs[0], 10, 10, 10), 'CIRCLE T: two clicks and a radius', JSON.stringify(cs));
+  await type('TTR'); await click(50, 0); await click(0, 50); await type('');
+  cs = doc.all().filter((e) => e.type === 'circle');
+  ok(cs.length === 2 && near(cs[1].r, 10), 'TTR takes the last radius on Enter');
+  await type('L', '100,0', '0,100', '');
+  await type('C', 'TTT'); await click(30, 0); await click(0, 30); await click(50, 50);
+  cs = doc.all().filter((e) => e.type === 'circle');
+  ok(cs.length === 3 && eq(cs[2], 100 - 50 * Math.SQRT2, 100 - 50 * Math.SQRT2, 100 - 50 * Math.SQRT2), 'CIRCLE TTT: the triangle\'s incircle by three picks', JSON.stringify(cs[2]));
+  await type('C', '300,0', '5', 'C', '340,0', '5');
+  await type('C', 'T'); await click(304, 3); await click(336, 3); await type('6');
+  ok(log.includes(EN('cmd.circle.no_circle')), 'no circle of that radius fits: "Circle does not exist."');
+}
+
+// ---------------------------------------------------------------------------
+section('View labels with the viewport\'s view name (0.5 WL.11)');
+{
+  const { doc, type, host, log } = harness();
+  await type('REC', '0,0', '1000,500');
+  doc.change('views', () => doc.setViews([{ name: 'Kitchen', cx: 250, cy: 125, w: 500, h: 250 }]));
+  await type('LAYOUT');
+  const vp = [...doc.layout.entities.values()].find((e) => e.type === 'viewport');
+  host.selection = new Set([vp.id]);
+  await type('VPVIEW', 'V', 'kitchen');
+  const v2 = doc.get(vp.id);
+  ok(v2.vname === 'Kitchen' && near(v2.cx, 250) && near(v2.s, Math.min(vp.w / 500, vp.h / 250)), 'VPVIEW View: the viewport shows the named view, and takes its name', JSON.stringify({ vname: v2.vname, s: v2.s }));
+  host.selection = new Set([vp.id]);
+  await type('VIEWLABEL', '');
+  const lab = [...doc.layout.entities.values()].find((e) => e.type === 'text' && e.field);
+  ok(lab && lab.s === 'Kitchen' && lab.field.vp === vp.id, 'VIEWLABEL places a text showing the view name', JSON.stringify(lab));
+  const steps = doc.undoStack.length;
+  doc.change('rename', () => doc.update(vp.id, { ...doc.get(vp.id), vname: 'Kitchen plan' }));
+  ok(doc.get(lab.id).s === 'Kitchen plan' && doc.undoStack.length === steps + 1, 'renaming the view: the label follows, in the same undo step');
+  doc.undo();
+  ok(doc.get(lab.id).s === 'Kitchen', 'undo brings both back');
+  const P = await load('propdefs.js');
+  const def = P.defsFor('viewport', [doc.get(vp.id)], { doc }).find((d) => d.key === 'vname');
+  ok(def && P.applyValue(doc, def, [doc.get(vp.id)], 'Store', { doc }).ok && doc.get(lab.id).s === 'Store', 'Properties › View name changes it too');
+  void log;
+}
+
+// ---------------------------------------------------------------------------
+section('Visibility states in the block editor (0.5 DB.9; visedit.js)');
+{
+  const { doc, type, host, log } = harness();
+  const L = (x1, y1, x2, y2) => ({ type: 'line', x1, y1, x2, y2, layer: '0', color: null });
+  const all = [[L(0, 0, 10, 0)], [L(0, 5, 10, 5)], [{ type: 'circle', cx: 5, cy: 10, r: 2, layer: '0', color: null }]];
+  doc.change('blk', () => doc.defineBlock({ name: 'SINK', base: { x: 0, y: 0 }, entities: [all[0][0], all[1][0]],
+    dyn: { def: true, src: 'A1', h: ['B1', 'B2', 'B3'], all, shown: [true, true, false], ad: [], vis: { node: 7, name: 'Visibility1', label: 'Visibility', states: [{ name: 'Single', show: [0, 1] }, { name: 'Double', show: [0, 2] }] } } }));
+  doc.change('ins', () => { doc.add({ type: 'insert', block: 'SINK', x: 0, y: 0, sx: 1, sy: 1, rot: 0, dyn: { state: 'Single', values: [{ node: 7, kind: 'visibility', state: 'Single' }] } }); doc.add({ type: 'insert', block: 'SINK', x: 50, y: 0, sx: 1, sy: 1, rot: 0, dyn: { state: 'Single', values: [{ node: 7, kind: 'visibility', state: 'Single' }] } }); });
+  const V = await load('dyn-blocks.js');
+  const refs = () => doc.all().filter((e) => e.type === 'insert');
+  ok(V.setVisibility(doc, refs()[1].id, 'Double').ok, '(fixture) the second reference shows "Double"');
+  await type('BEDIT', 'SINK');
+  const be = doc.blockEdit;
+  ok(be?.vis && be.vis.cur === 'Single' && doc.all().length === 2, 'BEDIT on a block with states opens on the one the definition shows', JSON.stringify({ cur: be?.vis?.cur, n: doc.all().length }));
+  await type('BVSTATE', 'S', 'double');
+  ok(be.vis.cur === 'Double' && doc.all().some((e) => e.type === 'circle') && doc.all().length === 2, 'BVSTATE Set current: the space shows that state');
+  await type('BVSTATE', 'N', 'Triple', 'S');
+  ok(be.vis.cur === 'Triple' && doc.all().length === 3, 'BVSTATE New, Show all: a third state showing everything');
+  host.selection = new Set(doc.all().filter((e) => e.type === 'line' && e.y1 === 5).map((e) => e.id));
+  await type('BVHIDE');
+  ok(doc.all().length === 2 && JSON.stringify(be.vis.states.find((s) => s.name === 'Triple').show) === '[0,2]', 'BVHIDE: hidden in this state only', JSON.stringify(be.vis.states));
+  doc.undo();
+  await type('BVSTATE', 'S', 'Single');
+  ok(JSON.stringify(be.vis.states.find((s) => s.name === 'Triple').show) === '[0,1,2]', 'UNDO in the editor puts the object back in the state too');
+  await type('BVSTATE', 'R', 'Single', 'One bowl');
+  await type('BVSTATE', 'D', 'Double');
+  ok(be.vis.states.map((s) => s.name).join() === 'One bowl,Triple', 'Rename and Delete', JSON.stringify(be.vis.states.map((s) => s.name)));
+  const top = doc.all().find((e) => e.type === 'line' && e.y1 === 0);
+  doc.change('move', () => doc.update(top.id, { ...top, y1: -1, y2: -1 }));
+  await type('BVSTATE', 'S', 'Triple', 'BVSHOW');
+  ok(log.includes(EN('cmd.bvshow.none', { state: 'Triple' })), 'BVSHOW with nothing hidden says so');
+  await type('BVSTATE', 'S', 'One bowl');
+  await type('BCLOSE', 'S');
+  const B = doc.blocks.get('SINK');
+  ok(B.dyn && B.dyn.visEdited && B.dyn.vis.states.map((s) => s.name).join() === 'One bowl,Triple' && B.entities.length === 2 && B.dyn.all[0][0].y1 === -1, 'BCLOSE: still dynamic, the states as edited, the moved line kept in every state', JSON.stringify(B.dyn.vis.states));
+  const [r1, r2] = refs();
+  ok(r1.dyn.state === 'One bowl' && r2.dyn.state === 'One bowl' && r2.block === 'SINK', 'references follow: renamed → the new name, deleted → the first state', JSON.stringify([r1.dyn.state, r2.dyn.state, r2.block]));
+  ok(V.setVisibility(doc, r1.id, 'Triple').ok && doc.blocks.get(doc.get(r1.id).block).entities.length === 3, 'a reference switches to the new state');
+  doc.undo(); doc.undo();
+  ok(doc.blocks.get('SINK').dyn.vis.states.length === 2 && doc.blocks.get('SINK').dyn.vis.states[0].name === 'Single', 'one UNDO takes the whole block edit back', JSON.stringify(doc.blocks.get('SINK').dyn.vis.states.map((s) => s.name)));
+  await type('BEDIT', 'SINK');
+  await type('ERASE', 'ALL', '');
+  await type('BCLOSE', 'S');
+  ok(!doc.blocks.get('SINK').dyn && log.includes(EN('cmd.bvstate.plain', { name: 'SINK' })), 'objects erased in the editor: saved as a plain block, said');
+  doc.change('plain', () => doc.defineBlock({ name: 'BOX', base: { x: 0, y: 0 }, entities: [L(0, 0, 1, 1)] }));
+  await type('BEDIT', 'BOX', 'BVSTATE');
+  ok(log.includes(EN('cmd.bvstate.no_states', { name: 'BOX' })), 'BVSTATE on a block without states: says making them is not built yet');
+  await type('BCLOSE', 'D', 'BPARAMETER');
+  ok(log.includes(EN('cmd.bparameter.not_built')), 'BPARAMETER: not built yet, said');
+}
+
+// ---------------------------------------------------------------------------
+section('Construction lines: XLINE and RAY (0.5 DR.6)');
+{
+  const ang = (e) => G.deg(G.normAngle(Math.atan2(e.dy, e.dx)));
+  {
+    const { doc, type, click } = harness();
+    await type('XL', '10,10', '20,20', '10,30', '');
+    let xs = doc.all();
+    ok(xs.length === 2 && xs.every((e) => e.type === 'xline' && near(e.x, 10) && near(e.y, 10)) && near(ang(xs[0]), 45) && near(ang(xs[1]), 90), 'XLINE through a point, then two through points: two construction lines from it', JSON.stringify(xs));
+    ok(xs.every((e) => near(Math.hypot(e.dx, e.dy), 1)), 'directions are unit vectors');
+    await type('XL', 'H', '0,5', '', 'XL', 'V', '7,0', '');
+    xs = doc.all().slice(2);
+    ok(xs.length === 2 && near(xs[0].dx, 1) && near(xs[0].dy, 0) && near(xs[0].y, 5) && near(xs[1].dx, 0) && near(xs[1].dy, 1) && near(xs[1].x, 7), 'XLINE Hor and Ver');
+    await type('XL', 'A', '30', '0,0', '');
+    ok(near(ang(doc.all().pop()), 30), 'XLINE Ang 30');
+    await type('L', '0,0', '100,100', '');
+    const ref = doc.all().pop();
+    await type('XL', 'A', 'R');
+    await click(50, 50);   // the 45° line
+    await type('15', '0,0', '');
+    ok(near(ang(doc.all().pop()), 60) && ref.type === 'line', 'XLINE Ang Reference: the picked line\'s 45° + 15° = 60°', JSON.stringify(doc.all().pop()));
+    await type('XL', 'B', '0,0', '10,0', '0,10', '-10,0', '');
+    xs = doc.all().slice(-2);
+    ok(near(ang(xs[0]), 45) && near(xs[0].x, 0) && near(ang(xs[1]) % 180, 90), 'XLINE Bisect: 45° for 0° and 90°; the perpendicular for a straight angle', JSON.stringify(xs.map(ang)));
+    await type('ERASE', 'ALL', '');
+    await type('L', '0,0', '100,0', '');
+    await type('XL', 'O', '5'); await click(50, 0); await type('50,10', '');
+    let o = doc.all().pop();
+    ok(o.type === 'xline' && near(o.y, 5) && near(Math.abs(o.dx), 1), 'XLINE Offset 5 from a line, toward the picked side', JSON.stringify(o));
+    await type('XL', 'O', ''); await click(50, 0); await type('50,-10', '');
+    o = doc.all().pop();
+    ok(near(o.y, -5), 'XLINE Offset remembers the distance (Enter takes it)', JSON.stringify(o));
+    await type('XL', 'O', 'T'); await click(50, 0); await type('3,20', '');
+    o = doc.all().pop();
+    ok(near(o.y, 20) && near(o.x, 3) && near(Math.abs(o.dx), 1), 'XLINE Offset Through a point');
+    await type('RAY', '0,0', '10,10', '-5,0', '');
+    xs = doc.all().slice(-2);
+    ok(xs.every((e) => e.type === 'ray' && near(e.x, 0) && near(e.y, 0)) && near(ang(xs[0]), 45) && near(ang(xs[1]), 180), 'RAY from a point through two points: two rays');
+  }
+  // geometry: no extents, picking, windows, snaps, intersections
+  const xl = { type: 'xline', layer: '0', x: 0, y: 0, dx: 1, dy: 0 }, ry = { type: 'ray', layer: '0', x: 0, y: 0, dx: 0, dy: 1 };
+  ok(!G.validBounds(G.entityBounds(xl)) && !G.validBounds(G.entityBounds(ry)), 'no extents (ZOOM Extents and plots leave them out)');
+  ok(near(G.distToEntity(xl, { x: 5e6, y: 3 }), 3) && near(G.distToEntity(ry, { x: 0, y: -4 }), 4) && near(G.distToEntity(ry, { x: 2, y: 1e5 }), 2), 'picked anywhere along their length (a ray not behind its start)');
+  const w = { minX: -10, minY: -10, maxX: 10, maxY: 10 };
+  ok(!G.inWindow(xl, w, false) && G.inWindow(xl, w, true) && !G.inWindow(xl, { minX: -1, minY: 1, maxX: 1, maxY: 2 }, true) && !G.inWindow(ry, { minX: -1, minY: -5, maxX: 1, maxY: -2 }, true), 'window never selects them; crossing does where they pass (not behind a ray)');
+  const sn = G.snapPoints(xl, { x: 0.2, y: 0.3 }, 1, new Set(G.SNAP_KINDS), null, { x: 3, y: 7 });
+  ok(!sn.some((s) => s.kind === 'end' || s.kind === 'mid') && sn.some((s) => s.kind === 'near') && G.snapPoints(xl, { x: 3, y: 0.2 }, 1, new Set(['perp']), null, { x: 3, y: 7 }).some((s) => s.kind === 'perp' && near(s.x, 3) && near(s.y, 0)), 'snaps: nearest and perpendicular, no end or midpoint');
+  const hit = G.intersect(G.prims({ type: 'xline', x: 3, y: 4, dx: Math.SQRT1_2, dy: Math.SQRT1_2 })[0], G.prims({ type: 'line', x1: 100, y1: -50, x2: 100, y2: 500 })[0]);
+  ok(hit.length === 1 && nearPt(hit[0], 100, 101, 1e-6), 'they intersect other objects far from their point, exactly', JSON.stringify(hit));
+  ok(JSON.stringify(G.clipInfinite({ x: 5, y: 5 }, { x: 1, y: 0 }, { minX: 0, minY: 0, maxX: 10, maxY: 10 })) === '[-5,5]' && G.clipInfinite({ x: 5, y: 5 }, { x: 1, y: 0 }, { minX: 0, minY: 0, maxX: 10, maxY: 10 }, true)[0] === 0 && G.clipInfinite({ x: 20, y: 5 }, { x: 1, y: 0 }, { minX: 0, minY: 0, maxX: 10, maxY: 10 }, true) === null, 'clipInfinite: an xline through a box, a ray from inside it, a ray pointing away');
+  // trim and break: xline → rays, ray → line
+  const cut1 = { type: 'line', x1: 10, y1: -5, x2: 10, y2: 5 }, cut2 = { type: 'line', x1: 20, y1: -5, x2: 20, y2: 5 };
+  const sp = G.trimSplit(xl, [cut1, cut2]);
+  ok(sp && sp.pieces.length === 3, 'an xline crossed twice splits into three pieces', JSON.stringify(sp?.pieces));
+  const kept = G.trimResult(sp, new Set([G.pieceAt(sp, { x: 15, y: 0 })]));
+  const rA = kept?.find((e) => e.type === 'ray' && e.dx < 0), rB = kept?.find((e) => e.type === 'ray' && e.dx > 0);
+  ok(kept && kept.length === 2 && rA && rB && near(rA.x, 10, 1e-6) && near(rB.x, 20, 1e-6) && near(rA.y, 0) && near(rB.y, 0), 'trimming the middle out of an xline leaves two rays from the cuts, outward', JSON.stringify(kept));
+  const sr = G.trimSplit(ry, [{ type: 'line', x1: -5, y1: 30, x2: 5, y2: 30 }]);
+  const kr = G.trimResult(sr, new Set([G.pieceAt(sr, { x: 0, y: 100 })]));
+  ok(kr && kr.length === 1 && kr[0].type === 'line' && near(kr[0].y1, 0) && near(kr[0].y2, 30, 1e-6) && kr[0].dx === undefined, 'trimming the far part of a ray leaves a line from its start to the cut', JSON.stringify(kr));
+  const kr2 = G.trimResult(sr, new Set([G.pieceAt(sr, { x: 0, y: 10 })]));
+  ok(kr2 && kr2.length === 1 && kr2[0].type === 'ray' && near(kr2[0].y, 30, 1e-6) && near(kr2[0].dy, 1), 'trimming its near part leaves a ray from the cut');
+  {
+    // TRIM (Quick mode) by a click: every object is an edge, construction lines included both ways
+    const { doc, type, click } = harness();
+    await type('XL', 'H', '0,50', '', 'L', '120,-100', '120,300', '', 'L', '0,0', '200,100', '');
+    await type('TR'); await click(170, 50); await type('');
+    const r = doc.all().find((e) => e.type === 'ray');
+    ok(r && near(r.x, 120, 1e-6) && near(r.y, 50, 1e-6) && r.dx < 0 && !doc.all().some((e) => e.type === 'xline'), 'TRIM by a click: the right part of an xline goes, a ray from the cut is left', JSON.stringify(doc.all()));
+    const ln = doc.all().find((e) => e.type === 'line' && near(e.x1, 0));
+    await type('TR'); await click(110, 55); await type('');   // the piece between the ray (x 100) and the line at x 120
+    const cut = doc.all().find((e) => e.type === 'line' && near(e.x1, 0));
+    ok(ln && cut && near(cut.x2, 100, 1e-6) && near(cut.y2, 50, 1e-6), 'an ordinary line is cut by the ray (a construction line is a cutting edge too)', JSON.stringify(cut));
+  }
+  const b1 = G.breakEntity(xl, { x: 4, y: 0 }, { x: 4, y: 0 });
+  ok(Array.isArray(b1) && b1.length === 2 && b1.every((e) => e.type === 'ray' && near(e.x, 4, 1e-6)), 'BREAK an xline at one point: two rays', JSON.stringify(b1));
+  const b2 = G.breakEntity(ry, { x: 0, y: 5 }, { x: 0, y: 8 });
+  ok(Array.isArray(b2) && b2.length === 2 && b2.some((e) => e.type === 'line' && near(e.y2, 5, 1e-6)) && b2.some((e) => e.type === 'ray' && near(e.y, 8, 1e-6)), 'BREAK a ray between two points: a line and a ray', JSON.stringify(b2));
+  // edits
+  const rot = G.txEntity(xl, G.mAbout({ x: 0, y: 0 }, G.mRotate(Math.PI / 2)));
+  ok(near(rot.dx, 0) && near(rot.dy, 1), 'ROTATE turns the direction');
+  const mir = G.txEntity({ ...ry, x: 5, dx: Math.SQRT1_2, dy: Math.SQRT1_2 }, G.mMirror({ x: 0, y: 0 }, { x: 0, y: 1 }));
+  ok(near(mir.x, -5) && near(mir.dx, -Math.SQRT1_2) && near(mir.dy, Math.SQRT1_2), 'MIRROR mirrors the point and the direction');
+  const sc = G.txEntity({ ...xl, x: 2, y: 3 }, G.mAbout({ x: 0, y: 0 }, G.mScale(10)));
+  ok(near(sc.x, 20) && near(sc.y, 30) && near(Math.hypot(sc.dx, sc.dy), 1), 'SCALE moves the point; the direction stays a unit one');
+  const off = G.offsetEntity(xl, 5, { x: 99, y: -1 });
+  ok(off && near(off.y, -5) && near(off.dx, 1), 'OFFSET toward the picked side');
+  ok(G.stretchEntity(xl, (p) => near(p.x, 0), 3, 4)?.y === 4 && G.stretchEntity(xl, () => false, 3, 4) === null, 'STRETCH moves it when its point is in the window');
+  // the clipboard: kept as themselves, checked like file data
+  {
+    const { doc } = harness();
+    doc.change('add', () => { doc.add({ ...xl, dx: 3, dy: 4 }); doc.add(ry); });
+    const clip = Cb.makeClip(doc, doc.all().map((e) => e.id));
+    const back = Cb.readClip(JSON.parse(JSON.stringify(clip))).clip;
+    const bx = back?.entities.find((e) => e.type === 'xline');
+    ok(back && back.entities.length === 2 && bx && near(bx.dx, 0.6) && near(bx.dy, 0.8), 'copied and read back (a direction is made a unit one)');
+    const r0 = Cb.readClip({ ...JSON.parse(JSON.stringify(clip)), entities: [{ ...ry, dx: 0, dy: 0 }] });
+    const bad = r0.error || (r0.clip ? null : JSON.stringify(r0));
+    ok(bad && /direction/.test(bad), 'a clipboard ray with no direction is refused', bad);
+  }
+  {
+    const { doc, type, log } = harness();
+    await type('RAY', '1,2', '1,10', '');
+    await type('LIST', 'ALL', '');
+    ok(log.some((l) => l.includes(EN('type.ray')) && l.includes('90')), 'LIST describes a ray (type, point, angle)', log.slice(-3).join(' | '));
+    void doc;
+  }
+}
+
+// ---------------------------------------------------------------------------
+section('UCS and a turned view: UCS, PLAN, TURNLEFT / TURNRIGHT / TURNWORLD (0.5 DR.8; ucs.js)');
+{
+  const Uc = await load('ucs.js');
+  const { View, affineOf, viewOf } = await load('view.js');
+  const u30 = { x: 100, y: 50, ang: G.rad(30) };
+  const w = Uc.toWorld(u30, { x: 10, y: 0 }), back = Uc.toUcs(u30, w);
+  ok(nearPt(w, 100 + 10 * Math.cos(G.rad(30)), 50 + 10 * Math.sin(G.rad(30))) && nearPt(back, 10, 0), 'ucs.js: UCS → world → UCS');
+  ok(Uc.cleanUcs({ x: 0, y: 0, ang: 0 }) === null && Uc.cleanUcs({ x: 1, y: 2, ang: 7 })?.ang < G.TAU && Uc.cleanUcs({ x: NaN, y: 0, ang: 0 }) === null && Uc.cleanUcs('x') === null, 'cleanUcs: the world is null, angles kept in a turn, bad data refused');
+  const ob = Uc.fromObject({ type: 'line', x1: 0, y1: 0, x2: 0, y2: 10 }, { x: 0, y: 9 });
+  ok(nearPt(ob, 0, 10) && near(ob.ang, G.rad(270)), 'UCS Object on a line: origin at the end nearer the pick, X along the line');
+  {
+    const { doc, type, host, log } = harness();
+    const turns = [];
+    host.turnView = (a) => turns.push(a);
+    const v0 = doc.version, u0 = doc.undoStack.length;
+    await type('UCS', 'Z', '90');
+    ok(doc.ucs && near(doc.ucs.ang, Math.PI / 2) && doc.version === v0 && doc.undoStack.length === u0 && !doc.dirty, 'UCS Z 90: a UCS turned a quarter; not an edit (no undo step, nothing unsaved)');
+    ok(turns.length === 1 && near(turns[0], Math.PI / 2), 'and the view turns with it (as UCSFOLLOW 1)');
+    await type('L', '0,0', '10,0', '@0,5', '');
+    const ls = doc.all();
+    ok(ls.length === 2 && near(ls[0].x2, 0) && near(ls[0].y2, 10) && near(ls[1].x2, -5) && near(ls[1].y2, 10), 'typed x,y and @dx,dy are in the UCS: 10,0 lands at world 0,10; @0,5 goes world −X', JSON.stringify(ls));
+    await type('L', '10<0', '*10,0', '');
+    const l3 = doc.all().pop();
+    ok(near(l3.x1, 0) && near(l3.y1, 10) && near(l3.x2, 10) && near(l3.y2, 0), 'd<a from the UCS origin along its X axis; * means world coordinates', JSON.stringify(l3));
+    await type('UCS', '*100,50', '');
+    ok(nearPt(doc.ucs, 100, 50) && near(doc.ucs.ang, Math.PI / 2), 'UCS with a new origin (typed in world coordinates), Enter keeps the angle');
+    await type('ID', '0,0');
+    ok(log.some((l) => l === EN('cmd.id.result', { x: '0.0000', y: '0.0000' }) || /X = 0(\.0+)?\s+Y = 0/.test(l)), 'ID reports UCS coordinates (the origin is 0, 0)', log.slice(-2).join(' | '));
+    await type('UCS', 'P');
+    ok(doc.ucs && nearPt(doc.ucs, 0, 0) && near(doc.ucs.ang, Math.PI / 2), 'UCS Previous');
+    await type('UCS', 'NA', 'S', 'North');
+    await type('UCS', 'W');
+    ok(doc.ucs === null && near(turns[turns.length - 1], 0), 'UCS World: back to the world, the view level again');
+    await type('UCS', 'NA', 'R', 'north');
+    ok(doc.ucs && near(doc.ucs.ang, Math.PI / 2) && doc.ucsNamed.length === 1, 'UCS NAmed Save / Restore (names match in any case)');
+    await type('UCS', 'NA', 'D', 'North');
+    ok(doc.ucsNamed.length === 0, 'UCS NAmed Delete');
+    await type('UCS', '3', '0,0', '*1,1', '');
+    ok(doc.ucs && nearPt(doc.ucs, 0, 50) && near(doc.ucs.ang, G.rad(45)) || (doc.ucs && near(doc.ucs.ang, G.rad(45))), 'UCS 3point from an origin and an X-axis point (*1,1 = world: 45°)', JSON.stringify(doc.ucs));
+    await type('UCS', 'W');
+  }
+  {
+    const { doc, type, click, host } = harness();
+    host.turnView = () => {};
+    await type('L', '0,0', '10,10', '');
+    await type('UCS', 'OB'); await click(9, 9);
+    ok(doc.ucs && near(doc.ucs.x, 10) && near(doc.ucs.ang, G.rad(225)), 'UCS OBject: a line picked near its end', JSON.stringify(doc.ucs));
+    await type('UCS', 'W', 'UCS', 'Z', '30');
+    await type('DT', '0,0', '2.5', '', 'Along the UCS', '');
+    const tx = doc.all().find((e) => e.type === 'text');
+    ok(tx && near(tx.rot, G.rad(30)), 'new text runs along the UCS X axis (its default angle)', tx && G.deg(tx.rot));
+    await type('DLI', '0,0', '*10,0', 'H', '5,5');
+    const dm = doc.all().find((e) => e.type === 'dim');
+    ok(dm && near(dm.rot, G.rad(30)), 'DIMLINEAR Horizontal measures along the UCS X axis', dm && G.deg(dm.rot));
+    await type('XL', 'A', '0', '0,0', '');
+    ok(near(Math.atan2(doc.all().pop().dy, doc.all().pop().dx), G.rad(30)), 'XLINE Ang 0 runs along the UCS X axis');
+    const turns = [];
+    host.turnView = (a) => turns.push(a);
+    await type('TURNWORLD', 'TURNRIGHT');
+    ok(near(doc.ucs.ang, Math.PI / 2) && near(turns.pop(), Math.PI / 2), 'TURNRIGHT = UCS Z 90 and the view follows');
+    await type('TURNLEFT', 'TURNLEFT');
+    ok(near(doc.ucs.ang, G.rad(270)), 'TURNLEFT twice: 90° − 180° = 270°');
+    await type('PLAN', 'W');
+    ok(near(turns.pop(), 0) && doc.ucs && near(doc.ucs.ang, G.rad(270)), 'PLAN World levels the view and keeps the UCS');
+    await type('PLAN', '');
+    ok(near(turns.pop(), G.rad(270)), 'PLAN (Current ucs) turns it back to the UCS');
+    doc.setSpace(null);
+    await type('LAYOUT');
+    const n = doc.ucsPrev.length;
+    await type('UCS', 'Z', '10');
+    ok(doc.ucsPrev.length === n, 'on a sheet UCS says it works on the Model tab and changes nothing');
+  }
+  {
+    const d = new Doc();
+    d.load({ ucs: { current: { x: 5, y: 6, ang: 1 }, named: [{ name: 'A', x: 0, y: 0, ang: 0 }, { name: 'B<', x: 1, y: 1, ang: 1 }, { name: 'C', x: 'q', y: 1, ang: 1 }] } });
+    ok(d.ucs && near(d.ucs.x, 5) && d.ucsNamed.length === 1 && d.ucsNamed[0].name === 'A', 'a file\'s UCS: the current one and the named ones are checked (a bad name or value is dropped)');
+  }
+  // the view: turned transform, fit, turning in place, twisted viewports, entered viewport with a twist
+  const doc = new Doc();
+  const v = Object.assign(Object.create(View.prototype), { doc, cx: 10, cy: 20, zoom: 3, tw: G.rad(30), w: 800, h: 600, x0: 0, y0: 0, views: new WeakMap(), state: { selection: new Set() }, invalidate() {} });
+  const sp = v.toScreen(15, 25), wp = v.toWorld(sp.x, sp.y);
+  ok(nearPt(wp, 15, 25, 1e-9) && nearPt(G.mApply(v.T, { x: 15, y: 25 }), sp.x, sp.y, 1e-9), 'a turned view: toScreen / toWorld / T agree');
+  const ux = v.toScreen(10 + Math.cos(G.rad(30)), 20 + Math.sin(G.rad(30)));
+  ok(near(ux.y, 300, 1e-9) && ux.x > 400, 'turned 30°: the world 30° direction is level on screen');
+  const vo = viewOf(affineOf(v.vs, 800, 600), 800, 600);
+  ok(near(vo.cx, 10) && near(vo.cy, 20) && near(vo.zoom, 3) && near(vo.tw, G.rad(30)), 'affineOf / viewOf round trip');
+  const mid = v.toWorld(400, 300);
+  v.turnTo(G.rad(-45));
+  ok(nearPt(v.toWorld(400, 300), mid.x, mid.y, 1e-9) && near(v.tw, G.rad(-45)), 'turnTo keeps the middle of the pane where it was');
+  v.fitPoints([{ x: 0, y: 0 }, { x: 10, y: 10 }], 1);
+  const a0 = v.toScreen(0, 0), a1 = v.toScreen(10, 10);
+  ok(Math.max(Math.abs(a1.x - a0.x) / 800, Math.abs(a1.y - a0.y) / 600) > 0.99, 'fitPoints fills the pane with what the points span on screen (ZOOM Window in a turned view)');
+  const before = v.toScreen(3, 4);
+  v.panBy(30, -12);
+  const after = v.toScreen(3, 4);
+  ok(near(after.x - before.x, 30, 1e-9) && near(after.y - before.y, -12, 1e-9), 'panBy moves the picture by the pointer\'s move, turned too');
+  const vpT = { type: 'viewport', x: 200, y: 150, w: 100, h: 80, cx: 50, cy: 60, s: 0.5, tw: G.rad(90) };
+  const M = G.viewportMatrix(vpT);
+  ok(nearPt(G.mApply(M, { x: 50, y: 60 }), 200, 150) && nearPt(G.mApply(M, { x: 52, y: 60 }), 200, 151), 'a twisted viewport (tw 90°): model +X shows as paper +Y');
+  const moved = G.gripMove(vpT, 'k2', { x: 260, y: 200 });
+  const pm = G.mApply(G.viewportMatrix(moved), { x: 70, y: 80 }), pb = G.mApply(M, { x: 70, y: 80 });
+  ok(nearPt(pm, pb.x, pb.y, 1e-9), 'resizing a twisted viewport by a corner keeps its view still on the sheet');
+  {
+    const d2 = new Doc();
+    d2.change('lay', () => d2.setLayouts([{ name: 'S', paper: { w: 420, h: 297, unit: 'mm', x0: 0, y0: 0 }, entities: new Map() }]));
+    d2.setSpace(d2.layouts[0]);
+    d2.change('vp', () => d2.add({ ...vpT }));
+    const vp = [...d2.layout.entities.values()][0];
+    const vv = Object.assign(Object.create(View.prototype), { doc: d2, cx: 210, cy: 148, zoom: 2, tw: 0, w: 800, h: 600, x0: 0, y0: 0, views: new WeakMap(), state: { selection: new Set() }, invalidate() {} });
+    vv.enterViewport(vp);
+    ok(near(vv.tw, G.rad(-90)) && vv.pendingViewport() === null, 'entering a twisted viewport turns the model view by its twist; nothing to write yet');
+    const P0 = G.mApply(G.viewportMatrix(vp), { x: 55, y: 61 }), s0 = vv.toScreen(55, 61), sP = G.mApply(affineOf(vv.paperView(), 800, 600), P0);
+    ok(nearPt(s0, sP.x, sP.y, 1e-6), 'a model point shows where the twisted viewport puts it on the sheet');
+    vv.zoomAt(400, 300, 2);
+    const pv = vv.pendingViewport();
+    ok(pv && near(pv.s, 1) && near(pv.tw, G.rad(90)), 'zoom inside it: the new view keeps its twist', JSON.stringify(pv && { s: pv.s, tw: pv.tw }));
+  }
+  ok(near(Tk.polarTrack({ x: 0, y: 0 }, { x: Math.cos(G.rad(31)) * 10, y: Math.sin(G.rad(31)) * 10 }, { inc: 90, tol: 1, start: G.rad(30) })?.ang, G.rad(30)), 'polar tracking counts its angles from the UCS X axis');
+  {
+    const dy = new DynInput();
+    dy.ucs = { x: 10, y: 0, ang: Math.PI / 2 };
+    dy.reset('xy');
+    const lv = dy.live({ x: 10, y: 5 }, null);
+    ok(near(lv[0], 5) && near(lv[1], 0), 'dynamic input shows X and Y in the UCS', JSON.stringify(lv));
+    dy.tab('3', () => true);
+    const ap = dy.apply({ x: 7, y: 1 }, null, Number);
+    ok(nearPt(ap, 7, 3), 'a locked X is a UCS X: UCS 3,3 is world 7,3', JSON.stringify(ap));
+    dy.reset('polar');
+    const pl = dy.live({ x: 10, y: 10 }, { x: 10, y: 0 });
+    ok(near(pl[0], 10) && near(pl[1], 0), 'polar fields: the angle from the UCS X axis', JSON.stringify(pl));
+  }
+  {
+    const { CadHost } = await load('lisp/host-cad.js');
+    const d3 = new Doc();
+    d3.ucs = { x: 10, y: 0, ang: Math.PI / 2 };
+    const h = new CadHost({ doc: d3, engine: { host: { viewTwist: () => Math.PI / 2 } } });
+    const tw1 = h.trans([1, 0, 0], 1, 0), tw2 = h.trans([1, 0], 1, 0, true), tw3 = h.trans([10, 1], 0, 1);
+    ok(nearPt({ x: tw1[0], y: tw1[1] }, 10, 1) && tw1.length === 3 && nearPt({ x: tw2[0], y: tw2[1] }, 0, 1) && nearPt({ x: tw3[0], y: tw3[1] }, 1, 0), '(trans) UCS ↔ world, points and directions');
+    const o = h.getvar('UCSORG'), xd = h.getvar('UCSXDIR');
+    ok(o[0] === 10 && near(xd[1], 1) && h.getvar('WORLDUCS').i === 0 && near(h.getvar('VIEWTWIST'), Math.PI / 2), 'LISP getvar UCSORG, UCSXDIR, WORLDUCS, VIEWTWIST');
+    d3.ucsNamed = [{ name: 'N1', x: 1, y: 2, ang: 0 }];
+    ok(h.tableList('UCS').length === 1 && h.tableList('UCS')[0].name === 'N1', 'the UCS table lists saved UCSs');
+  }
+}
+
+// ---------------------------------------------------------------------------
+section('My tools: macros, keys, CUIx import (0.5 DR.9; macro.js, shortcuts.js, mytools.js, cuix.js)');
+{
+  const Mc = await load('macro.js'), Sk = await load('shortcuts.js'), Mt = await load('mytools.js'), Cx = await load('cuix.js');
+  const { lookup } = await load('commands.js');
+  const kinds = (m) => Mc.parseMacro(m).steps.map((x) => x.kind === 'send' ? 'send:' + x.text : x.kind).join(' ');
+  ok(kinds('^C^C_line') === 'cancel cancel send:line', 'parseMacro: ^C^C_line = cancel, cancel, LINE', kinds('^C^C_line'));
+  ok(kinds('^C^C_rectang;0,0;@100,50;') === 'cancel cancel send:rectang send:0,0 send:@100,50', '; and the end send each answer', kinds('^C^C_rectang;0,0;@100,50;'));
+  ok(kinds("^C^C._circle \\25;") === 'cancel cancel send:circle pause send:25', 'a space is Enter, \\ waits for you, . and _ prefixes dropped', kinds("^C^C._circle \\25;"));
+  ok(kinds('^C^C_line;;') === 'cancel cancel send:line enter', 'an empty ; is a plain Enter');
+  ok(Mc.parseMacro('*^C^C_line').repeat && JSON.stringify(Mc.parseMacro("^C^C'_zoom;e").commands) === '["ZOOM"]', '* repeats; the commands it starts are listed');
+  ok(kinds('^C^C^O_line') === 'cancel cancel toggle send:line', '^O toggles ortho');
+  ok(kinds('$M=$(if,$(getvar,ORTHOMODE),^C^C_line,^C^C_circle)') === 'cancel cancel send:circle' && Mc.parseMacro('$M=$(if,$(getvar,ORTHOMODE),^C^C_line,^C^C_circle)', { getvar: (n) => (n === 'ORTHOMODE' ? 1 : 0) }).steps.pop().text === '_line'.slice(1), 'DIESEL $(if,$(getvar,…)) picks a branch from the sysvar');
+  const bad = Mc.parseMacro('$M=$(strlen,abc)');
+  ok(!bad.steps.length && bad.notes[0]?.fills.name === 'strlen', 'any other DIESEL function stops the macro and says which');
+  ok(Sk.normKey('ctrl+shift+l') === 'Ctrl+Shift+L' && Sk.normKey('Shift-Cmd-k') === 'Ctrl+Shift+K' && Sk.normKey('F9') === 'F9' && Sk.normKey('Ctrl+Q+W') === null, 'normKey: one written form; two keys refused');
+  ok(Sk.keyProblem('L') === 'plain' && Sk.keyProblem('Ctrl+Z') === 'reserved' && Sk.keyProblem('Ctrl+Shift+F') === 'reserved' && Sk.keyProblem('Alt+L', new Map([['Alt+L', 'x']])) === 'taken' && Sk.keyProblem('Ctrl+Alt+L') === null && Sk.keyProblem('F5') === null, 'keyProblem: plain letters, CadCraft / shell / browser keys and clashes refused');
+  {   // WL.18: keys for any command
+    const r = Sk.cleanShortcuts({ format: 'cadcraft-shortcuts', version: 1, keys: { 'ctrl+alt+l': 'LINE', 'Ctrl+S': 'SAVE', F9: 'ZOOM E', 'Alt+Q': 'NOPE', 'Alt+L': 'LINE', 'K': 'LINE' } }, { known: (c) => !!lookup(c), taken: new Map([['Alt+L', 'My line']]) });
+    ok(JSON.stringify([...r.keys]) === '[["Ctrl+Alt+L","LINE"],["F9","ZOOM E"]]', 'command shortcuts: a key in its one form → the text it runs', JSON.stringify([...r.keys]));
+    ok(['keys.err.reserved', 'keys.err.command', 'keys.err.taken', 'keys.err.plain'].every((k) => r.errors.some((e) => e.key === k)), 'refused: Save\'s key, an unknown command, a My tools key, a plain letter', JSON.stringify(r.errors.map((e) => e.key)));
+    ok(JSON.stringify(Sk.shortcutsData(r.keys)) === '{"format":"cadcraft-shortcuts","version":1,"keys":{"Ctrl+Alt+L":"LINE","F9":"ZOOM E"}}', 'stored as data');
+  }
+  ok(Sk.keyOfEvent({ key: 'l', ctrlKey: true, shiftKey: true }) === 'Ctrl+Shift+L' && Sk.keyOfEvent({ key: '!', code: 'Digit1', altKey: true, shiftKey: true }) === 'Alt+Shift+1' && Sk.keyOfEvent({ key: 'Shift', shiftKey: true }) === null, 'keyOfEvent');
+  const png = 'data:image/png;base64,' + Buffer.from([0x89, 0x50, 0x4e, 0x47, 13, 10, 26, 10, 0, 0, 0, 0]).toString('base64');
+  const svg = 'data:image/svg+xml;base64,' + Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>').toString('base64');
+  const fake = 'data:image/png;base64,' + Buffer.from('<svg/>').toString('base64');
+  ok(Mt.checkIcon(png) === 'png' && Mt.checkIcon(svg) === 'svg' && Mt.checkIcon(fake) === null && Mt.checkIcon('data:text/html;base64,PGI+') === null && Mt.checkIcon('data:image/png;base64,' + Buffer.alloc(70000, 1).toString('base64')) === null, 'icons: a real PNG or SVG ≤ 64 KB, checked by its bytes');
+  const cl = Mt.cleanTools({ format: 'cadcraft-mytools', version: 1, groups: [{ name: 'G\u0007', tools: [
+    { id: 'a', label: 'Box', macro: '^C^C_rectang', key: 'ctrl+alt+b', icon: svg },
+    { id: 'a', label: 'Dup id', macro: '^C^C_line', key: 'Ctrl+Alt+B' },
+    { label: 'Bad icon', macro: '^C^C_line', icon: fake },
+    { label: '', macro: 'x' }, { label: 'Plain key', macro: '^C^C_line', key: 'K' }] }] });
+  const tl = cl.data.groups[0].tools;
+  ok(cl.data.groups[0].name === 'G' && tl.length === 4 && tl[0].key === 'Ctrl+Alt+B' && tl[1].id !== 'a' && !tl[1].key && !tl[2].icon && !tl[3].key, 'cleanTools: names cleaned, ids unique, a clashing / plain key or a fake icon dropped', JSON.stringify(tl.map((x) => [x.id, x.key, !!x.icon])));
+  ok(cl.errors.some((e) => e.key === 'mytools.err.key.taken') && cl.errors.some((e) => e.key === 'mytools.err.key.plain') && cl.errors.some((e) => e.key === 'mytools.err.icon') && cl.errors.some((e) => e.key === 'mytools.err.tool'), 'and each drop is said');
+  ok(Mt.cleanTools({ format: 'x' }).data.groups.length === 0 && Mt.cleanTools(JSON.parse(Mt.exportTools(cl.data))).data.groups[0].tools.length === 4, 'export → import keeps every button; a foreign file is refused');
+  const mg = Mt.mergeTools(cl.data, [{ name: 'g', tools: [{ label: 'X', macro: '^C^C_line', key: 'Ctrl+Alt+B' }] }]);
+  ok(mg.data.groups[1].name === 'g (2)' && !mg.data.groups[1].tools[0].key, 'merging: a group name already used gets (2); a key already taken is dropped');
+  // the hand-made CUIx (tools/cadcraft-test/make-cuix.mjs)
+  const cuix = fs.readFileSync(path.join(ROOT, 'tools/cadcraft-test/fixtures/my-tools.cuix'));
+  const r = await Cx.readCuix(new Uint8Array(cuix), { lookup: (c) => !!lookup(c) });
+  const g0 = r.groups.find((g) => g.name === 'My drafting'), rib = r.groups.find((g) => g.name === 'Quick shapes'), keys = r.groups.find((g) => g.shortcuts);
+  ok(g0 && g0.tools.length === 7 && g0.tools[0].macro === '^C^C_line' && g0.tools[1].label === 'Box', 'CUIx: a toolbar becomes a group, its buttons in order (the separator and a missing macro left out)', JSON.stringify(g0?.tools.map((x) => x.label)));
+  ok(g0.tools[0].icon?.startsWith('data:image/png;base64,') && Mt.checkIcon(g0.tools[0].icon) === 'png' && Mt.checkIcon(g0.tools[1].icon) === 'png', 'its PNG picture is kept and its BMP picture becomes a PNG');
+  ok(rib && rib.tools.map((x) => x.label).join() === 'Ribbon box,Ribbon line', 'a ribbon panel becomes a group too');
+  ok(keys && keys.tools.find((x) => x.key === 'Ctrl+Shift+L') && keys.tools.some((x) => x.key === 'Ctrl+S'), 'shortcut keys come through with their keys (CTRL+SHIFT+L → Ctrl+Shift+L)');
+  ok(JSON.stringify(r.missing) === '["SUPERHATCH"]' && r.aliases.length === 2, 'the commands CadCraft lacks are listed, not guessed; the PGP aliases are read', JSON.stringify(r.missing));
+  ok(r.notes.some((n) => n.key === 'mytools.note.diesel') && r.notes.some((n) => n.key === 'mytools.note.no_macro'), 'unsupported DIESEL and a button pointing nowhere are said');
+  const merged = Mt.mergeTools(Mt.emptyTools(), r.groups);
+  ok(merged.errors.some((e) => e.key === 'mytools.err.key.reserved') && Mt.keyMap(merged.data).has('Ctrl+Shift+L') && !Mt.keyMap(merged.data).has('Ctrl+S'), 'imported: Ctrl+S (CadCraft\'s Save) refused, Ctrl+Shift+L kept');
+  for (const [name, bytes, why] of [['not a zip', new TextEncoder().encode('hello'), 'zip'], ['a DOCTYPE', null, 'doctype']]) {
+    let err = null;
+    let b = bytes;
+    if (!b) { const raw = fs.readFileSync(path.join(ROOT, 'tools/cadcraft-test/fixtures/my-tools.cuix')); b = new Uint8Array(raw); }
+    try { if (why === 'doctype') Cx.parseXml('<!DOCTYPE x [<!ENTITY a "b">]><x>&a;</x>'); else await Cx.readCuix(b); } catch (e) { err = e.message; }
+    ok(err === why, 'refused: ' + name, String(err));
+  }
+  const truncated = new Uint8Array(cuix.subarray(0, 900));
+  let terr = null; try { await Cx.readCuix(truncated); } catch (e) { terr = e.message; }
+  ok(terr === 'zip', 'a cut-off CUIx is refused, nothing half-read');
+  const bmp = await Cx.bmpToPng(new Uint8Array([0x42, 0x4d, ...new Array(60).fill(0)]));
+  ok(bmp === null, 'a BMP with no size is refused');
+  ok(JSON.stringify(Cx.parseXml('<a x="1 &amp; 2"><b>t&lt;</b><![CDATA[<c>]]></a>').children[0]) === JSON.stringify({ name: 'a', attrs: { x: '1 & 2' }, children: [{ name: 'b', attrs: {}, children: [], text: 't<' }], text: '<c>' }), 'parseXml: attributes, entities, CDATA');
+}
+
+// ---------------------------------------------------------------------------
 section('Layer tools (LAYISO, LAYUNISO, LAYOFF, LAYFRZ, LAYMCUR, LAYON, LAYTHW; layertools.js)');
 {
   const LT = await load('layertools.js');
@@ -2623,6 +3272,644 @@ section('Multileaders, pictures and wipeouts from files (0.4 C6)');
   }
 }
 
+section('Layers frozen in one viewport (0.5 VP.1)');
+{
+  const { readDwg } = await load('dwg/read.js');
+  const { saveDwg } = await load('dwg-save.js');
+  const { writeDxf2000 } = await load('dxf2000.js');
+  const { doc, type } = harness();
+  doc.addLayer({ name: 'Walls', color: 1 }); doc.addLayer({ name: 'Notes', color: 3 });
+  doc.change('setup', () => {
+    doc.add({ type: 'line', layer: 'Walls', color: null, x1: 0, y1: 0, x2: 1000, y2: 0 });
+    doc.add({ type: 'line', layer: 'Notes', color: null, x1: 0, y1: 100, x2: 1000, y2: 100 });
+    doc.add({ type: 'line', layer: 'Notes', color: null, x1: 0, y1: 200, x2: 1000, y2: 200 });
+  });
+  doc.meta.units = 'millimeters';
+  await type('LAYOUT');
+  await type('LAYOUT');   // a second sheet: R12 keeps it as a block, its viewports as frames with CadCraft's xdata
+  const vps = doc.layouts.map((l) => [...l.entities.values()].find((e) => e.type === 'viewport'));
+  ok(vps.length === 2 && vps.every(Boolean), 'two sheets, each with a viewport');
+  for (const [i, l] of doc.layouts.entries()) doc.change('frz', () => doc.update(vps[i].id, { ...vps[i], frz: ['Notes'] }, l.entities));
+  const prims = (lay, dd = doc) => { const dl = Pl.displayList(dd, Pl.layoutSheet(dd, lay)); return dl.views.slice(0, -1).reduce((n, v) => n + v.strokes.reduce((m, st) => m + st.prims.length, 0), 0); };
+  ok(prims(doc.layouts[0]) === 1, 'plotting the sheet: the viewport shows Walls only (Notes frozen in it)', prims(doc.layouts[0]));
+  const seen = []; walkFn(doc, doc.model.values(), { stroke: (c, ps) => seen.push(ps.length) }, { frozen: new Set(['NOTES']) });
+  ok(seen.length === 1, 'walk.js: a frozen set leaves those layers out (names case-insensitive)', seen.length);
+  ok(doc.layers.get('Notes').frozen === false && [...doc.model.values()].length === 3, 'nothing about the layer or the model changes');
+  const frzOf = (d) => d.layouts.map((l) => [...l.entities.values()].filter((e) => e.type === 'viewport').map((e) => (e.frz || []).map((n) => n.toUpperCase()).sort().join('+')).join('|')).join(' / ');
+  const want = 'NOTES / NOTES';
+  for (const v of ['2000', '2004', '2018']) {
+    const b = new Doc(); b.load(importDwg(readDwg(saveDwg(doc, { version: v }).bytes), { versionTag: 'x' }));
+    ok(frzOf(b) === want, 'DWG ' + v + ' round trip keeps each viewport\'s frozen layers', frzOf(b));
+  }
+  { const b = new Doc(); b.load(readDxf(writeDxf2000(doc).text)); ok(frzOf(b) === want, 'DXF 2000 round trip keeps them (331 handles)', frzOf(b)); }
+  { const t = writeDxf(doc).text, b = new Doc(); b.load(readDxf(t)); ok(frzOf(b) === want, 'DXF R12 round trip keeps them (MVIEW 1003 names; the second sheet in CadCraft xdata)', frzOf(b)); }
+  doc.setLayer('Notes', { name: 'Annotation' });
+  ok(frzOf(doc) === 'ANNOTATION / ANNOTATION', 'renaming the layer renames it in every viewport\'s list', frzOf(doc));
+  await type('U');
+  ok(frzOf(doc) === want, 'one undo puts the old name back', frzOf(doc));
+  const SAMPLES = '/var/www/CADCRAFT/testfiles/dwg-samples';
+  const arch = path.join(SAMPLES, 'architectural_-_annotation_scaling_and_multileaders.dwg');
+  if (fs.existsSync(arch)) {
+    const d = new Doc(); d.load(importDwg(readDwg(new Uint8Array(fs.readFileSync(arch))), { versionTag: 'AC1021' }));
+    const vs = d.layouts.flatMap((l) => [...l.entities.values()].filter((e) => e.type === 'viewport').map((e) => ({ l, e })));
+    const counts = vs.map(({ e }) => (e.frz || []).length);
+    // LibreDWG (black box) reads the same lists; three entries of each are null handles (layers since purged) and are dropped
+    ok(counts.filter((n) => n > 0).length === 4 && counts.filter((n) => n > 0).every((n) => n >= 6) && vs.every(({ e }) => (e.frz || []).every((n) => d.layers.has(n))) && vs.some(({ e }) => (e.frz || []).includes('PS_Viewport')),
+      'Autodesk sample: 4 of its 5 viewports freeze 6–7 layers each, all known by name', counts.join());
+    const lay = d.layouts.find((l) => [...l.entities.values()].some((e) => e.frz?.length));
+    const withFrz = prims(lay, d);
+    const saved = [...lay.entities.values()].filter((e) => e.frz);
+    for (const e of saved) lay.entities.set(e.id, { ...e, frz: undefined });
+    const without = prims(lay, d);
+    for (const e of saved) lay.entities.set(e.id, e);
+    ok(withFrz < without, 'its sheet plots fewer lines through the viewports than with every layer on (' + withFrz + ' < ' + without + ')');
+    for (const v of ['2000', '2018']) {
+      const b = new Doc(); b.load(importDwg(readDwg(saveDwg(d, { version: v }).bytes), { versionTag: 'x' }));
+      ok(frzOf(b) === frzOf(d), 'Autodesk sample saved as DWG ' + v + ' and reopened: the same lists', frzOf(b));
+    }
+    { const b = new Doc(); b.load(readDxf(writeDxf2000(d).text)); ok(frzOf(b) === frzOf(d), 'Autodesk sample as DXF 2000: the same lists', frzOf(b)); }
+  }
+}
+
+section('Dynamic blocks in files (0.5 DB.2; dyn-blocks.js, docs/DWG-DYNAMIC-BLOCKS.md)');
+{
+  const { readDwg } = await load('dwg/read.js');
+  const { saveDwg } = await load('dwg-save.js');
+  const DB = await load('dyn-blocks.js');
+  const file = '/var/www/CADCRAFT/testfiles/dwg-samples/blocks_and_tables_-_imperial.dwg';   // AutoCAD's sample (outside git)
+  if (fs.existsSync(file)) {
+    const src = readDwg(new Uint8Array(fs.readFileSync(file)));
+    const d = new Doc(); d.load(importDwg(src, { versionTag: 'AC1021' }));
+    const rec = d.blocks.get('Receptacle'), gfi = d.blocks.get('*B21'), duplex = d.blocks.get('*B20');
+    ok(rec?.dyn?.def && rec.dyn.vis?.states.map((x) => x.name).join('|') === 'Duplex|GFI' && rec.dyn.vis.label === 'Visibility', 'the definition opens under its true name with its visibility states');
+    ok(rec.dyn.all.length === 5 && rec.entities.length === 3 && rec.attdefs?.length === 1 && rec.dyn.shown.filter(Boolean).length === 4,
+      'it keeps all 5 file objects; the 3 shown in its saved state draw (+ its attribute definition), the hidden MTEXT waits');
+    ok(gfi?.dyn?.of === 'Receptacle' && gfi.entities.some((e) => e.type === 'text') && !duplex.entities.some((e) => e.type === 'text'), 'a reference\'s copy points to its definition and shows its own state (GFI has the text, Duplex not)');
+    const refs = [...d.model.values()].filter((e) => e.dyn);
+    ok(refs.length === 134 && refs.filter((e) => e.dyn.state === 'GFI').length === 7 && refs.filter((e) => e.block === 'Receptacle' && e.dyn.state === 'Duplex').length === 37, 'references carry their state (7 GFI, 37 Duplex straight to the definition)');
+    const strokes = []; walkFn(d, [refs.find((e) => e.block === 'Receptacle')], { stroke: (c, ps) => strokes.push(ps.length), text: () => strokes.push('T') });
+    ok(!strokes.includes('T'), 'a Duplex reference draws without the GFI label');
+    const st = (m) => { const o = {}; for (const b of m.blocks) for (const e of b.entities) if (e.dyn?.state) o[e.dyn.state] = (o[e.dyn.state] || 0) + 1; return JSON.stringify(o); };
+    const out = saveDwg(d, { version: '2007' }), back = readDwg(out.bytes);
+    ok(back.report.dynamicBlocks === 12 && st(back) === st(src), 'saved as AutoCAD 2007 (its own version): 12 dynamic definitions and every reference\'s state come back', st(back));
+    const v2 = back.objects.filter((o) => o.type === 'BLOCKVISIBILITYPARAMETER'), H = new Set(back.blocks.flatMap((b) => b.entities.map((e) => e.handle)));
+    const D2 = await import(pathToFileURL(path.join(APP, 'dwg/dynblock-read.js')).href);
+    ok(v2.length === 6 && v2.every((o) => { const v = D2.visibilityOf(o); return [...v.all, ...v.states.flatMap((x) => x.entities)].every((h) => H.has(h)); }), 'every visibility parameter still names entities that are in the file');
+    const hidden = back.blocks.reduce((n, b) => n + b.entities.filter((e) => e.invisible).length, 0), hidden0 = src.blocks.reduce((n, b) => n + b.entities.filter((e) => e.invisible).length, 0);
+    ok(hidden === hidden0 && hidden0 === 150, 'the hidden objects of the other states are saved hidden (150, as the original)', hidden + ' / ' + hidden0);
+    const again = new Doc(); again.load(importDwg(back, { versionTag: 'AC1021' }));
+    ok(again.blocks.get('Receptacle')?.dyn?.vis?.states.length === 2 && [...again.model.values()].filter((e) => e.dyn).length === 134, 'and CadCraft opens its own save as dynamic again');
+    const out18 = saveDwg(d, { version: '2018' });
+    ok(out18.report.notes.some((n) => n === EN('dwg.save.dyn.version', { n: 12, v: EN('dwg.version', { v: '2018' }) })), 'saved as 2018: the save says they stay dynamic only in the version the drawing came in');
+    // a dynamic block changed in the block editor is saved as a plain block, and said
+    d.change('BEDIT', () => d.defineBlock({ ...rec, entities: [...rec.entities, { type: 'line', layer: '0', color: null, x1: 0, y1: 0, x2: 1, y2: 1 }] }));
+    const out2 = saveDwg(d, { version: '2007' }), back2 = readDwg(out2.bytes);
+    ok(!back2.blocks.find((b) => b.name === 'Receptacle')?.dynamic && back2.report.dynamicBlocks === 11 && out2.report.notes.includes(EN('dwg.save.dyn.dropped', { n: 1 })), 'changed in CadCraft: that one is saved as a plain block (the other 11 stay dynamic), and said', out2.report.notes.join(' | '));
+    ok(DB.dynEntities({ entities: [], dyn: { all: [[{ type: 'line' }]], shown: [true], ad: [] } }) === null, 'dynEntities refuses a block that no longer lines up');
+  }
+  const dxfFile = '/var/www/CADCRAFT/testfiles/dwg-corpus/_truth/orig/blocks-and-tables-imperial.dxf';   // the ODA converter's DXF of it
+  if (fs.existsSync(dxfFile)) {
+    const r = readDxf(fs.readFileSync(dxfFile, 'utf8'));
+    const rec = r.blocks.find((b) => b.name === 'Receptacle'), gfi = r.blocks.find((b) => b.name === '*B21');
+    ok(rec?.entities.length === 3 && gfi?.entities.length === 4, 'DXF: objects the file hides (group 60) are not drawn — each copy shows only its state', rec?.entities.length + ' / ' + gfi?.entities.length);
+  }
+}
+
+section('Switching a visibility state (0.5 DB.4; dyn-blocks.js setVisibility)');
+{
+  const { readDwg } = await load('dwg/read.js');
+  const { saveDwg } = await load('dwg-save.js');
+  const DB = await load('dyn-blocks.js');
+  const file = '/var/www/CADCRAFT/testfiles/dwg-samples/blocks_and_tables_-_imperial.dwg';
+  if (fs.existsSync(file)) {
+    const d = new Doc(); d.load(importDwg(readDwg(new Uint8Array(fs.readFileSync(file))), { versionTag: 'AC1021' }));
+    const refs = () => [...d.model.values()].filter((e) => e.dyn);
+    const duplex = refs().find((e) => e.block === 'Receptacle');
+    const info = DB.visibilityOf(d, duplex);
+    ok(info && info.label === 'Visibility' && info.states.join('|') === 'Duplex|GFI' && info.current === 'Duplex', 'visibilityOf: the label, the states and the current one');
+    const nBlocks = d.blocks.size;
+    let r = DB.setVisibility(d, duplex.id, 'GFI', d.model);
+    const now = d.model.get(duplex.id);
+    ok(r.ok && now.dyn.state === 'GFI' && d.blocks.get(now.block).dyn.of === 'Receptacle' && d.blocks.size === nBlocks, 'Duplex → GFI reuses the GFI copy already in the drawing (no new block)', r.block);
+    ok(d.blocks.get(now.block).entities.some((e) => e.type === 'text'), 'and now shows the GFI label');
+    d.undo();
+    ok(d.model.get(duplex.id).block === 'Receptacle' && d.model.get(duplex.id).dyn.state === 'Duplex', 'one undo puts it back');
+    d.redo();
+    const toilet = refs().find((e) => e.block === 'Toilet');
+    r = DB.setVisibility(d, toilet.id, 'Side', d.model);
+    const tb = d.blocks.get(r.block);
+    ok(r.ok && /^\*B\d+$/.test(r.block) && d.blocks.size === nBlocks + 1 && tb.dyn.made && tb.dyn.of === 'Toilet', 'Toilet → Side: no copy shows that state, so a new *B block is made', r.block);
+    const def = d.blocks.get('Toilet'), side = def.dyn.vis.states.find((x) => x.name === 'Side');
+    ok(tb.entities.length === side.show.reduce((n, i) => n + def.dyn.all[i].length, 0), 'the new copy shows exactly the Side objects');
+    const t2 = refs().find((e) => e.block === 'Toilet' && e.id !== toilet.id);
+    r = DB.setVisibility(d, t2.id, 'Side', d.model);
+    ok(r.block === tb.name && d.blocks.size === nBlocks + 1, 'a second Toilet switched to Side shares that copy');
+    ok(DB.setVisibility(d, toilet.id, 'Nope', d.model).error === 'no-state' && DB.setVisibility(d, [...d.model.values()].find((e) => e.type === 'line').id, 'GFI', d.model).error === 'not-dynamic', 'an unknown state or a plain object is refused');
+    const sink = refs().find((e) => e.block === 'Sink');
+    DB.setVisibility(d, sink.id, 'Kitchen - Plan', d.model);
+    // saved in its own version: AutoCAD 2007
+    const back = readDwg(saveDwg(d, { version: '2007' }).bytes);
+    const dynRefs = back.blocks[0].entities.filter((e) => e.dyn);
+    const byState = (blk, st) => dynRefs.filter((e) => e.block === blk && e.dyn.state === st).length;
+    ok(back.report.dynamicBlocks === 12 && dynRefs.length === 134, 'saved as 2007: still 12 dynamic definitions and every reference dynamic');
+    const newB = back.blocks.find((b) => b.name !== 'Toilet' && b.dynamicOf === back.blocks.find((x) => x.name === 'Toilet').record && dynRefs.some((e) => e.block === b.name && e.dyn.state === 'Side'));
+    ok(newB && byState(newB.name, 'Side') === 2, 'the two Toilets read back in Side, on a copy tagged with its definition (AcDbBlockRepBTag)', newB?.name);
+    ok(dynRefs.filter((e) => e.dyn.state === 'GFI').length === 8 && dynRefs.filter((e) => e.dyn.state === 'Duplex').length === 37, 'the switched receptacle reads back GFI (it had no representation data: made for it)');
+    ok(dynRefs.some((e) => e.dyn.state === 'Kitchen - Plan' && e.block !== 'Sink'), 'the sink reads back in Kitchen - Plan');
+    // every reference's visible objects are its state's, as AutoCAD keeps them (DWG-DYNAMIC-BLOCKS.md "copy rule")
+    const D2 = await import(pathToFileURL(path.join(APP, 'dwg/dynblock-read.js')).href);
+    let match = 0, total = 0;
+    for (const e of dynRefs) {
+      const blk = back.blocks.find((b) => b.name === e.block), defB = back.blocks.find((b) => b.record === e.dyn.def);
+      const vis = defB?.dynamic.params.find((p) => p.kind === 'visibility');
+      if (!vis) continue;
+      total++;
+      if (D2.stateShown(vis, defB, blk) === e.dyn.state) match++;
+    }
+    ok(total > 60 && match === total, 'every reference with a visibility parameter shows exactly its state\'s objects (' + match + '/' + total + ')');
+    // DXF keeps what is shown
+    const dx = new Doc(); dx.load(readDxf(writeDxf(d).text));
+    const tR = [...dx.model.values()].find((e) => e.type === 'insert' && near(e.x, toilet.x, 1e-6) && near(e.y, toilet.y, 1e-6));
+    ok(tR && dx.blocks.get(tR.block)?.entities.length === tb.entities.length, 'DXF R12: the switched toilet keeps its Side objects', JSON.stringify([tR?.block, dx.blocks.get(tR?.block)?.entities.length, tb.entities.length, tb.name]));
+  }
+}
+
+section('Saving edited visibility states (0.5 DB.9 file side; dyn-blocks.js, cc-dwg dynblock-write.js)');
+{
+  const { readDwg } = await load('dwg/read.js');
+  const { saveDwg } = await load('dwg-save.js');
+  const W = await load('dwg/dynblock-write.js');
+  const D2 = await load('dwg/dynblock-read.js');
+  const file = '/var/www/CADCRAFT/testfiles/dwg-samples/blocks_and_tables_-_imperial.dwg';   // AutoCAD's sample (outside git)
+  if (fs.existsSync(file)) {
+    const src = readDwg(new Uint8Array(fs.readFileSync(file)));
+    const params = src.objects.filter((o) => o.type === 'BLOCKVISIBILITYPARAMETER');
+    ok(params.length === 6 && params.every((o) => W.reencodesExactly(o.raw)), 'the encoder writes all 6 visibility parameters of AutoCAD\'s sample bit for bit from their fields');
+    const p0 = params[0], f0 = W.visibilityFields(p0.raw);
+    const same = W.rewriteVisibility(p0.raw, f0.states.map((s) => ({ name: s.name, entities: s.entities.map(([, h]) => h) })));
+    ok(same.n === p0.raw.n && same.data === p0.raw.data, 'states written back unchanged = the file\'s own bits');
+    const err = (fn) => { try { fn(); return ''; } catch (e) { return e.message; } };
+    const bad = { ...p0.raw, h: [...p0.raw.h, [4, '1']] };
+    ok(!W.reencodesExactly(bad) && err(() => W.rewriteVisibility(bad, [{ name: 'A', entities: [] }])) === 'not-exact', 'a parameter that does not re-encode exactly is refused (the caller saves the block plain)');
+    ok(err(() => W.rewriteVisibility(p0.raw, [{ name: 'A', entities: ['FFFFFF'] }])) === 'handles' && err(() => W.rewriteVisibility(p0.raw, [{ name: 'A', entities: [] }, { name: 'a', entities: [] }])) === 'states', 'a state naming an object outside the block, or two states with one name, are refused');
+
+    // edit in the block editor: Receptacle — rename, a new empty state, hide an object in GFI; Toilet — rename a state
+    const { doc, host, type } = harness();
+    doc.load(importDwg(src, { versionTag: 'AC1021' }));
+    const refsOf = (m, blk, st) => m.blocks[0].entities.filter((e) => e.dyn && (!st || e.dyn.state === st) && (!blk || m.blocks.find((b) => b.record === e.dyn.def)?.name === blk)).length;
+    const toiletPlan = refsOf(src, 'Toilet', 'Plan'), recGfi = refsOf(src, 'Receptacle', 'GFI'), recDuplex = refsOf(src, 'Receptacle', 'Duplex');
+    await type('BEDIT', 'Receptacle');
+    await type('BVSTATE', 'R', 'Duplex', 'Duplex (US)');
+    await type('BVSTATE', 'N', 'Blank', 'H');
+    await type('BVSTATE', 'S', 'GFI');
+    host.selection = new Set(doc.all().filter((e) => e.type === 'circle').map((e) => e.id));
+    await type('BVHIDE');
+    await type('BVSTATE', 'S', 'Duplex (US)', 'BCLOSE', 'S');
+    await type('BEDIT', 'Toilet', 'BVSTATE', 'R', 'Plan', 'Floor plan', 'BCLOSE', 'S');
+    const rec = doc.blocks.get('Receptacle'), toilet = doc.blocks.get('Toilet');
+    ok(rec.dyn?.visEdited && rec.dyn.vis.states.map((s) => s.name).join('|') === 'Duplex (US)|GFI|Blank' && toilet.dyn?.visEdited, 'BEDIT: the states as edited (fixture)', JSON.stringify(rec.dyn?.vis?.states));
+    const gfiShow = rec.dyn.vis.states[1].show;
+    ok(!gfiShow.some((i) => rec.dyn.all[i]?.[0]?.type === 'circle') && rec.dyn.vis.states[2].show.length === 0, 'GFI lost its circle, Blank shows nothing (fixture)');
+
+    // (b) saved in its own version: the edited parameters are written, every block stays dynamic
+    const out = saveDwg(doc, { version: '2007' }), back = readDwg(out.bytes);
+    ok(back.report.dynamicBlocks === 12 && !out.report.notes.includes(EN('dwg.save.dyn.dropped', { n: 1 })), 'saved as 2007: all 12 definitions stay dynamic, nothing saved plain', out.report.notes.join(' | '));
+    const recB = back.blocks.find((b) => b.name === 'Receptacle'), recV = recB?.dynamic?.params.find((p) => p.kind === 'visibility');
+    const idx = (list) => list.map((h) => recB.entities.findIndex((e) => e.handle === h)).sort((a, b) => a - b);
+    ok(recV && recV.states.map((s) => s.name).join('|') === 'Duplex (US)|GFI|Blank', 'cc-dwg reads the renamed and the new state back', recV && recV.states.map((s) => s.name).join('|'));
+    ok(recV && rec.dyn.vis.states.every((s, i) => JSON.stringify(idx(recV.states[i].entities)) === JSON.stringify(s.show)), 'each state lists exactly the objects it shows in CadCraft (GFI without the circle, Blank none)', recV && JSON.stringify(recV.states.map((s) => idx(s.entities))));
+    const elemTypes = (s) => s.elements.map((h) => back.objects.find((o) => o.handle === h)?.type).join();
+    ok(recV && elemTypes(recV.states[2]) === elemTypes(recV.states[0]) && elemTypes(recV.states[0]).includes('BLOCKVISIBILITYGRIP'), 'the new state shows the parameters and grips of the state it was made from (its visibility grip too)', recV && elemTypes(recV.states[2]));
+    const toiletV = back.blocks.find((b) => b.name === 'Toilet')?.dynamic?.params.find((p) => p.kind === 'visibility');
+    ok(toiletV?.states.map((s) => s.name).join('|') === 'Floor plan|Front|Side' && refsOf(back, 'Toilet', 'Floor plan') === toiletPlan && toiletPlan > 0 && refsOf(back, 'Toilet', 'Plan') === 0, 'Toilet: Plan renamed Floor plan in the parameter and in every reference that showed it (' + toiletPlan + ')');
+    ok(refsOf(back, 'Receptacle', 'Duplex (US)') === recDuplex && recDuplex > 30 && refsOf(back, 'Receptacle', 'GFI') === recGfi, 'Receptacle references keep their states under the new names (' + recDuplex + ' Duplex (US), ' + recGfi + ' GFI)');
+    let match = 0, total = 0;
+    for (const e of back.blocks[0].entities.filter((x) => x.dyn)) {
+      const blk = back.blocks.find((b) => b.name === e.block), defB = back.blocks.find((b) => b.record === e.dyn.def);
+      const vis = defB?.dynamic.params.find((p) => p.kind === 'visibility');
+      if (!vis) continue;
+      total++;
+      if (D2.stateShown(vis, defB, blk) === e.dyn.state) match++;
+    }
+    ok(total > 60 && match === total, 'every reference shows exactly its state\'s objects as edited — GFI references moved to a copy without the circle (' + match + '/' + total + ')');
+    const again = new Doc(); again.load(importDwg(back, { versionTag: 'AC1021' }));
+    ok(again.blocks.get('Receptacle')?.dyn?.vis?.states.map((s) => s.name).join('|') === 'Duplex (US)|GFI|Blank' && !again.blocks.get('Receptacle').dyn.visEdited, 'CadCraft opens its own save with the edited states');
+    ok(readDwg(saveDwg(again, { version: '2007' }).bytes).objects.filter((o) => o.type === 'BLOCKVISIBILITYPARAMETER').every((o) => W.reencodesExactly(o.raw)), 'the written parameters re-encode exactly in turn (a second edit can be saved too)');
+
+    // independent readers: LibreDWG (the vendored libredwg-web, a black box) decodes the parameters; libdxfrw and the ODA
+    // File Converter (audit on) open the file without complaint (ODA drops dynamic-block objects, so it can't see states)
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-db9-'));
+    const dwgPath = path.join(tmp, 'edited-states-2007.dwg');
+    fs.writeFileSync(dwgPath, out.bytes);
+    const dxfPath = path.join(tmp, 'libredwg.dxf');
+    let lr = null;
+    try { execFileSync(process.execPath, [path.join(ROOT, 'tools/modelcraft-test/dwg2dxf.mjs'), dwgPath, dxfPath], { stdio: 'ignore', timeout: 120000 }); lr = fs.readFileSync(dxfPath, 'latin1'); } catch { lr = null; }
+    if (lr) {
+      const lines = lr.split(/\r?\n/), objs = [];
+      for (let i = 0; i + 1 < lines.length; i += 2) {
+        const c = lines[i].trim(), v = lines[i + 1];
+        if (c === '0') objs.push({ type: v.trim(), g: [] }); else if (objs.length) objs[objs.length - 1].g.push([c, v]);
+      }
+      const vp = objs.filter((o) => o.type === 'BLOCKVISIBILITYPARAMETER' && o.g.some(([c]) => c === '5'));
+      const statesOf = (o) => { const out2 = []; for (const [c, v] of o.g) { if (c === '303') out2.push({ name: v, n: 0 }); else if (c === '94' && out2.length) out2[out2.length - 1].n = Number(v); } return out2; };
+      const recL = vp.map(statesOf).find((s) => s.map((x) => x.name).join('|') === 'Duplex (US)|GFI|Blank');
+      ok(vp.length === 6 && recL && recL.map((x) => x.n).join() === rec.dyn.vis.states.map((s) => s.show.length).join() && vp.map(statesOf).some((s) => s.map((x) => x.name).join('|') === 'Floor plan|Front|Side'),
+        'LibreDWG reads the edited parameters: the same state names and object counts', JSON.stringify(vp.map(statesOf)));
+    } else console.log('  (skipped: LibreDWG oracle — the vendored libredwg-web did not convert)');
+    const { availableReaders } = await import(pathToFileURL(path.join(ROOT, 'tools/civilcraft-test/dwg-readers.mjs')).href);
+    for (const rd of availableReaders(path.join(ROOT, 'tools/civilcraft-test')).filter((x) => !/LibreDWG/.test(x.name))) {
+      const r = rd.run([dwgPath], tmp).get(dwgPath);
+      ok(!r.problems.length && fs.existsSync(r.dxf), rd.name + ' opens the edited file cleanly', r.problems.join(' | '));
+    }
+    fs.rmSync(tmp, { recursive: true, force: true });
+
+    // (a) the guard: a parameter that can't be re-encoded → that block saved plain, never its old parameter beside the new flags
+    const d2 = new Doc(); d2.load(importDwg(src, { versionTag: 'AC1021' }));
+    d2.blocks.get('Receptacle').dyn = { ...rec.dyn };
+    const ph = d2.blocks.get('Receptacle').dyn.vis.param;
+    d2.dynSrc = { ...d2.dynSrc, objects: d2.dynSrc.objects.map((o) => (o.handle === ph || o.handle.replace(/^0+/, '') === ph ? { ...o, raw: { ...o.raw, h: [...o.raw.h, [4, '1']] } } : o)) };
+    const out3 = saveDwg(d2, { version: '2007' }), back3 = readDwg(out3.bytes);
+    const r3 = back3.blocks.find((b) => b.name === 'Receptacle');
+    ok(ph && !r3?.dynamic && back3.report.dynamicBlocks === 11 && out3.report.notes.includes(EN('dwg.save.dyn.dropped', { n: 1 })), 'edited states whose parameter can\'t be written: that block is saved plain (the other 11 stay dynamic), and said', out3.report.notes.join(' | '));
+    ok(r3 && !r3.entities.some((e) => e.invisible) && back3.objects.filter((o) => o.type === 'BLOCKVISIBILITYPARAMETER').length === 5, '…showing its current state with no hidden objects and no old parameter of its own');
+    // DXF has no dynamic data either way: each block shows its current state
+    const dx = new Doc(); dx.load(readDxf(writeDxf(doc).text));
+    const dx0 = new Doc(); dx0.load(readDxf(writeDxf((() => { const u = new Doc(); u.load(importDwg(src, { versionTag: 'AC1021' })); return u; })()).text));
+    const nE = (x) => [...x.blocks.values()].find((bk) => bk.name.toUpperCase() === 'RECEPTACLE')?.entities.length;
+    ok(nE(dx) > 0 && nE(dx) === nE(dx0), 'DXF R12: the edited block shows its current state, as before the edit (DXF keeps no visibility states)', nE(dx) + ' / ' + nE(dx0));
+  }
+}
+
+section('Pictures: IMAGEATTACH, IMAGE, IMAGECLIP, saving and plotting (0.5 WL.14, WL.13; pictures.js)');
+{
+  const Pc = await load('pictures.js');
+  await load('pictures-cmd.js');
+  const { readDwg } = await load('dwg/read.js');
+  const { saveDwg } = await load('dwg-save.js');
+  const PICS = path.join(ROOT, 'tools/cadcraft-test/fixtures/pictures');   // make.py: 40 × 30, quadrants red / green / blue / white
+  const file = (n) => ({ name: n, bytes: new Uint8Array(fs.readFileSync(path.join(PICS, n))) });
+  const near8 = (a, b, tol = 12) => a.every((v, i) => Math.abs(v - b[i]) <= tol);
+  const RED = [220, 30, 30], GREEN = [30, 180, 60], BLUE = [40, 60, 220], WHITE = [255, 255, 255];
+  // decoding (the PDF needs the pixels): every PNG kind Pillow writes
+  for (const n of ['quad-rgb.png', 'quad-grey.png', 'quad-rgba.png', 'quad-palette.png']) {
+    const img = await Pc.decodePng(file(n).bytes);
+    const px = (x, y) => [0, 1, 2].map((k) => img.rgb[(y * img.w + x) * 3 + k]);
+    const grey = n === 'quad-grey.png';
+    ok(img && img.w === 40 && img.h === 30 && (grey ? px(2, 2)[0] === px(2, 2)[1] : near8(px(2, 2), RED) && near8(px(37, 2), GREEN) && near8(px(2, 27), BLUE)), 'PNG decoded: ' + n);
+    if (n === 'quad-rgba.png' || n === 'quad-palette.png') ok(img.alpha && img.alpha[29 * 40 + 39] === 0 && img.alpha[0] === 255, n + ': its transparency becomes a mask');
+  }
+  ok(Pc.sniffPicture(file('quad.jpg').bytes)?.w === 40 && Pc.jpegInfo(file('quad.jpg').bytes).components === 3, 'JPEG: size and colour channels read from its header');
+  ok(Pc.sniffPicture(new TextEncoder().encode('<svg></svg>')) === null, 'anything else is refused (by content, not by name)');
+
+  // IMAGEATTACH: pick, corner, width, angle
+  const { doc, host, type, click, log } = harness();
+  host.pickPictures = async () => [file('quad-rgb.png')];
+  await type('IAT', '100,100', '80', '0');
+  const ref = [...doc.model.values()].find((e) => e.type === 'insert'), blk = ref && doc.blocks.get(ref.block), fr = Pc.pictureFrame(blk);
+  ok(ref && /^\*I\d+$/.test(ref.block) && fr && fr.pic.w === 40 && fr.pic.h === 30 && near(fr.pic.ux, 2) && near(fr.pic.vy, 2), 'IMAGEATTACH places the picture 80 wide (2 units a pixel) as a picture block', JSON.stringify(fr?.pic));
+  ok(log.some((l) => l === EN('pic.attached', { file: 'quad-rgb.png', w: 40, h: 30 })), 'and says so');
+  const seen = []; walkFn(doc, [ref], { stroke: () => {}, text: (c, e) => seen.push('T:' + e.s), picture: (p) => seen.push(p) });
+  const pp = seen.find((x) => typeof x === 'object');
+  ok(pp && near(pp.place.x, 100) && near(pp.place.y, 100) && near(pp.place.ux, 2) && !seen.some((x) => typeof x === 'string'), 'walk.js reports it (its name text left out: the file is there)');
+  doc.undo();
+  ok(![...doc.model.values()].some((e) => e.type === 'insert'), 'one undo takes it away');
+  doc.redo();
+
+  // PDF at the picture's own resolution, under the linework; with a cap, fewer pixels
+  await type('L', '90,160', '200,160', '');
+  const area = { minX: 90, minY: 90, maxX: 200, maxY: 170 };
+  const sheet = Pl.modelSheet(doc, { area, paper: 'iso-a4', n: 1 });
+  const list = Pl.displayList(doc, sheet, { mono: false });
+  const pdf = await Pl.toPdf(list);
+  const tmpPdf = path.join(os.tmpdir(), 'cc-pic-' + process.pid + '.pdf');
+  fs.writeFileSync(tmpPdf, pdf.bytes);
+  ok(pdf.report.pictures === 1, 'the PDF has the picture');
+  try {
+    const lst = execFileSync('/usr/bin/pdfimages', ['-list', tmpPdf], { encoding: 'utf8' });
+    ok(/\s40\s+30\s+rgb\s+3\s+8\s+image/.test(lst), 'poppler sees a 40 × 30 RGB image: its own pixels, no resampling', lst.split('\n')[2]);
+    const DPI = 200, base = path.join(os.tmpdir(), 'cc-pic-' + process.pid);
+    execFileSync('/usr/bin/pdftoppm', ['-r', String(DPI), '-png', '-singlefile', tmpPdf, base]);
+    const img = await Pc.decodePng(new Uint8Array(fs.readFileSync(base + '.png')));
+    const m = sheet.views[0].m, toPx = (x, y) => { const q = { x: m[0] * x + m[2] * y + m[4], y: m[1] * x + m[3] * y + m[5] }; return [Math.round(q.x / 25.4 * DPI), Math.round(img.h - q.y / 25.4 * DPI)]; };
+    const at = (x, y) => { const [px, py] = toPx(x, y); return [0, 1, 2].map((k) => img.rgb[(py * img.w + px) * 3 + k]); };
+    ok(near8(at(120, 145), RED, 20) && near8(at(160, 145), GREEN, 20) && near8(at(120, 115), BLUE, 20) && near8(at(160, 115), WHITE, 20), 'rendered, each quadrant is where the drawing puts it', JSON.stringify([at(120, 145), at(160, 145), at(120, 115), at(160, 115)]));
+    const [lx, ly] = toPx(150, 160);
+    ok([0, 1, 2].some((k) => img.rgb[(ly * img.w + lx) * 3 + k] < 100), 'the line across the top is drawn over it (vector, not part of the picture)');
+    fs.unlinkSync(base + '.png');
+    const capped = await Pl.toPdf(list, { maxDpi: 10 });
+    fs.writeFileSync(tmpPdf, capped.bytes);
+    const l2 = execFileSync('/usr/bin/pdfimages', ['-list', tmpPdf], { encoding: 'utf8' }).split('\n')[2] || '';
+    ok(capped.report.shrunk === 1 && /\s3[01]\s+2[34]\s+rgb/.test(l2), 'with a 10 dpi cap the 80 mm picture goes in at about 31 × 23 pixels', l2);
+  } catch (err) { ok(false, 'poppler on the picture PDF', String(err.message).slice(0, 200)); }
+  finally { fs.rmSync(tmpPdf, { force: true }); }
+  // a JPEG goes in as it is (DCTDecode)
+  const jp = await Pc.pdfImage({ mime: 'image/jpeg', bytes: file('quad.jpg').bytes });
+  ok(jp && jp.filter === 'DCTDecode' && jp.data.length === file('quad.jpg').bytes.length, 'a JPEG goes into the PDF as it is');
+
+  // IMAGECLIP, then DWG: IMAGE + IMAGEDEF, clip in pixels; reopened the same
+  // IMAGECLIP to a rectangle, then DWG: IMAGE + IMAGEDEF, the clip in pixels; reopened the same
+  host.pickAt = () => ref.id;
+  await type('ICL');
+  await click(130, 130);
+  await type('R', '110,110', '150,140');
+  const fr2 = Pc.pictureFrame(doc.blocks.get(doc.get(ref.id).block));
+  ok(fr2?.pic.clipped && fr2.pts.length === 4 && near(Math.min(...fr2.pts.map((q) => q.x)), 10) && near(Math.max(...fr2.pts.map((q) => q.y)), 40), 'IMAGECLIP R: the frame is the clip (block coordinates)', JSON.stringify(fr2?.pts));
+  for (const v of ['2000', '2018']) {
+    const out = saveDwg(doc, { version: v });
+    const back = readDwg(out.bytes);
+    const im = back.blocks[0].entities.find((e) => e.type === 'IMAGE');
+    const def = im && back.objects.find((o) => o.type === 'IMAGEDEF' && o.handle === im.def);
+    ok(im && def && /quad-rgb\.png$/.test(def.fileName) && near(im.insert.x, 100) && near(im.u.x, 2) && near(im.v.y, 2) && im.size.x === 40 && im.size.y === 30, 'DWG ' + v + ': an IMAGE with its IMAGEDEF (file, size, place)', JSON.stringify(im && { insert: im.insert, u: im.u, def: def?.fileName }));
+    ok(im?.clipping && im.clip.length === 4 && near(Math.min(...im.clip.map((q) => q.x)), 4.5) && near(Math.min(...im.clip.map((q) => q.y)), 9.5), 'DWG ' + v + ': its clip in pixels (x 4.5…, y down from the top row)', JSON.stringify(im?.clip));
+    const d2 = new Doc(); d2.load(importDwg(back, { versionTag: 'x' }));
+    const r2 = [...d2.model.values()].find((e) => e.type === 'insert' && Pc.pictureFrame(d2.blocks.get(e.block)));
+    const f3 = r2 && Pc.pictureFrame(d2.blocks.get(r2.block));
+    ok(f3 && f3.pic.clipped && near(f3.pic.x, 100) && near(f3.pic.ux, 2) && Math.abs(Math.min(...f3.pts.map((q) => q.x)) - 110) < 1e-6, 'reopened: the same picture and clip', JSON.stringify(f3?.pts));
+  }
+  // the kitchen fixture's picture: a frame and its name until IMAGE is given the file; then the picture
+  const kd = new Doc(); kd.load(importDwg(readDwg(new Uint8Array(fs.readFileSync(path.join(ROOT, 'fixtures/dwg/kitchen-equipment.dwg')))), { versionTag: 'AC1032' }));
+  const kref = [...kd.everyEntity()].find((e) => e.type === 'insert' && Pc.pictureFrame(kd.blocks.get(e.block)));
+  const kf = kref && Pc.pictureFrame(kd.blocks.get(kref.block));
+  ok(kf && /example-logo\.png$/i.test(kf.pic.file) && kf.pic.w > 0, 'a DWG\'s picture opens knowing its file and pixels', kf?.pic.file);
+  const kh = harness(); kh.doc.load(importDwg(readDwg(new Uint8Array(fs.readFileSync(path.join(ROOT, 'fixtures/dwg/kitchen-equipment.dwg')))), { versionTag: 'AC1032' }));
+  kh.host.pickPictures = async () => [{ name: 'Project-0042-example-logo.png', bytes: file('quad-rgb.png').bytes }];
+  await kh.type('IMAGE');
+  ok(kh.log.some((l) => l === EN('pic.added', { n: 1 })) && Pc.findPicture(kh.doc, kf.pic.file), 'IMAGE takes a file whose name contains the one the drawing names (exports add a prefix)', kh.log.slice(-3).join(' | '));
+  const kseen = []; walkFn(kh.doc, [...kh.doc.everyEntity()].filter((e) => e.type === 'insert' && Pc.pictureFrame(kh.doc.blocks.get(e.block))), { stroke: () => {}, text: (c, e) => kseen.push(e.s), picture: (p) => kseen.push(p) });
+  ok(kseen.some((x) => typeof x === 'object') && !kseen.includes('example-logo.png'), 'then it draws as the picture, without the stand-in name');
+}
+
+section('Background masks behind text: TEXTMASK (0.5 WL.8; walk.js maskLoop, MTEXT background)');
+{
+  await load('textmask-cmd.js');
+  const { readDwg } = await load('dwg/read.js');
+  const { saveDwg } = await load('dwg-save.js');
+  const { writeDxf2000 } = await load('dxf2000.js');
+  const W = await load('walk.js');
+  const { doc, host, type, log } = harness();
+  await type('L', '0,5', '100,5', '');
+  doc.change('t', () => { doc.add({ type: 'text', layer: '0', color: null, x: 10, y: 3, h: 5, rot: 0, s: 'MASKED', ha: 'left', va: 'baseline' }); doc.add({ type: 'text', layer: '0', color: 1, x: 10, y: 40, h: 5, rot: 0, s: 'RED', ha: 'left', va: 'baseline' }); });
+  const [t1, t2] = [...doc.model.values()].filter((e) => e.type === 'text');
+  host.selection = new Set([t1.id]);
+  await type('TEXTMASK', 'B', '1.5');
+  host.selection = new Set([t2.id]);
+  await type('TEXTMASK', 'C', '3', '2');
+  ok(doc.get(t1.id).bgm?.color === 'bg' && doc.get(t1.id).bgm.scale === 1.5 && doc.get(t2.id).bgm?.color === 3 && doc.get(t2.id).bgm.scale === 2, 'TEXTMASK: the drawing\'s background on one, colour 3 on the other');
+  const loop = W.maskLoop(doc.get(t1.id), 1.5);
+  ok(loop.length === 10 && Math.min(loop[0], loop[6]) < 10 - 2.4 && Math.min(loop[1], loop[5]) < 3, 'its mask is the text box grown by half a text height', JSON.stringify(loop.map((x) => +x.toFixed(2))));
+  const seq = []; walkFn(doc, doc.model.values(), { stroke: () => seq.push('S'), text: () => seq.push('T'), fill: () => seq.push('F'), mask: (c, l, o) => seq.push(o.wipe ? 'Mbg' : 'M' + c) });
+  ok(seq.join(',') === 'S,Mbg,T,M#00a000,T' || seq.filter((x) => x[0] === 'M').length === 2 && seq.indexOf('Mbg') < seq.indexOf('T'), 'walk.js reports each mask just before its text', seq.join(','));
+  for (const v of ['2004', '2018']) {
+    const back = readDwg(saveDwg(doc, { version: v }).bytes);
+    const mt = back.blocks[0].entities.filter((e) => e.type === 'MTEXT');
+    ok(mt.length === 2 && mt.some((e) => e.backgroundFlags === 3) && mt.some((e) => e.backgroundFlags === 1 && e.backgroundColor?.index === 3 && Math.abs(e.backgroundScale - 2) < 1e-9), 'DWG ' + v + ': masked texts are MTEXT with their background (flags, colour, offset)', JSON.stringify(mt.map((e) => [e.backgroundFlags, e.backgroundColor, e.backgroundScale])));
+    const d2 = new Doc(); d2.load(importDwg(back, { versionTag: 'x' }));
+    const ts = [...d2.model.values()].filter((e) => e.type === 'text');
+    ok(ts.some((e) => e.bgm?.color === 'bg') && ts.some((e) => e.bgm?.color === 3 && e.bgm.scale === 2), 'DWG ' + v + ' reopened: the same masks');
+  }
+  const out2000 = saveDwg(doc, { version: '2000' });
+  ok(out2000.report.notes.includes(EN('dwg.save.mask2000', { n: 2 })), 'DWG 2000 has no MTEXT background: the save says so');
+  const dxt = writeDxf2000(doc).text, dx = new Doc(); dx.load(readDxf(dxt));
+  ok([...dx.model.values()].filter((e) => e.bgm).length === 2 && [...dx.model.values()].some((e) => e.bgm?.color === 3), 'DXF 2000 round trip keeps both masks (90, 63, 45)');
+  const audit = ezdxfAudit(dxt);
+  ok(!audit || audit.errors === 0, 'ezdxf audits that DXF without errors', audit && JSON.stringify(audit.messages));
+  ok(writeDxf(doc).report.notes.includes(EN('dxf.save.textmask', { n: 2 })), 'DXF R12 cannot hold them: said');
+  // the PDF: the mask hides the line under the text (white over it), the line shows elsewhere
+  const sheet = Pl.modelSheet(doc, { area: { minX: 0, minY: 0, maxX: 100, maxY: 50 }, paper: 'iso-a4', n: 1 });
+  const list = Pl.displayList(doc, sheet);
+  ok(list.views[0].masks.length === 2 && list.views[0].masks.every((m) => m.color === '#ffffff'), 'plotted in black: both masks are paper white');
+  const pdf = await Pl.toPdf(list);
+  const f = path.join(os.tmpdir(), 'cc-mask-' + process.pid);
+  fs.writeFileSync(f + '.pdf', pdf.bytes);
+  try {
+    execFileSync('/usr/bin/pdftoppm', ['-r', '150', '-gray', '-singlefile', f + '.pdf', f]);
+    const pgm = fs.readFileSync(f + '.pgm'), head = pgm.toString('latin1', 0, 40).split(/\s+/), Wd = +head[1], Hd = +head[2], off = pgm.length - Wd * Hd;
+    const m = sheet.views[0].m, px = (x, y) => { const q = { x: m[0] * x + m[2] * y + m[4], y: m[1] * x + m[3] * y + m[5] }; const r = Math.round(Hd - q.y / 25.4 * 150), cx = Math.round(q.x / 25.4 * 150); let v = 255; for (let d = -3; d <= 3; d++) v = Math.min(v, pgm[off + (r + d) * Wd + cx]); return v; };   // the darkest within ±3 rows (a 0.25 mm line)
+    ok(px(80, 5) < 128 && px(9, 5) > 200, 'rendered: the line is black away from the text and hidden under its mask', px(80, 5) + ' / ' + px(9, 5));
+  } catch (err) { ok(false, 'pdftoppm on the mask PDF', err.message); }
+  finally { for (const x of ['.pdf', '.pgm']) fs.rmSync(f + x, { force: true }); }
+}
+
+section('XLINE and RAY in files and plots (0.5 DR.7)');
+{
+  const { readDwg } = await load('dwg/read.js');
+  const { writeDxf2000 } = await load('dxf2000.js');
+  const ex = path.join(DWG, 'example_2018.dwg');
+  if (fs.existsSync(ex)) {
+    const r = importDwg(readDwg(new Uint8Array(fs.readFileSync(ex))), { versionTag: 'AC1032' });
+    const xs = r.entities.filter((e) => e.type === 'xline' || e.type === 'ray');
+    ok(xs.length === 2 && xs.every((e) => Math.abs(Math.hypot(e.dx, e.dy) - 1) < 1e-12) && !r.report.skipped.XLINE && !r.report.skipped.RAY, 'AutoCAD\'s example: its XLINE and RAY open (no longer left out)', JSON.stringify(xs.map((e) => [e.type, e.x, e.y, e.dx, e.dy])));
+  }
+  const d = new Doc();
+  d.change('x', () => {
+    d.add({ type: 'line', layer: '0', color: null, x1: 0, y1: 0, x2: 100, y2: 50 });
+    d.add({ type: 'xline', layer: '0', color: null, x: 50, y: 25, dx: 0, dy: 1 });
+    d.add({ type: 'ray', layer: '0', color: null, x: 50, y: 25, dx: 1, dy: 0 });
+  });
+  const b2 = new Doc(); b2.load(readDxf(writeDxf2000(d).text));
+  ok([...b2.model.values()].filter((e) => e.type === 'xline' || e.type === 'ray').length === 2, 'DXF 2000 round trip keeps them as themselves');
+  const r12 = writeDxf(d), b3 = new Doc(); b3.load(readDxf(r12.text));
+  const ls = [...b3.model.values()].filter((e) => e.type === 'line');
+  ok(ls.length === 3 && r12.report.notes.includes(EN('dxf.save.infinite', { n: 2 })) && ls.some((e) => e.x1 === 50 && e.x2 === 50 && Math.min(e.y1, e.y2) === 0 && Math.max(e.y1, e.y2) === 50), 'DXF R12: lines across the drawing\'s extents, and said', JSON.stringify(ls.map((e) => [e.x1, e.y1, e.x2, e.y2])));
+  const sheet = Pl.modelSheet(d, { area: { minX: 0, minY: 0, maxX: 100, maxY: 50 }, paper: 'iso-a4', n: null });
+  const list = Pl.displayList(d, sheet);
+  const prims = list.views[0].strokes.flatMap((s) => s.prims);
+  const inside = prims.every((q) => [q.x1, q.x2].every((x) => x >= -1e-6 && x <= sheet.w + 1e-6) && [q.y1, q.y2].every((y) => y >= -1e-6 && y <= sheet.h + 1e-6));
+  ok(prims.length === 3 && inside, 'PLOT clips them to what it prints (no ±1e9 stand-ins in the PDF)', JSON.stringify(prims.map((q) => [q.x1, q.y1, q.x2, q.y2].map((v) => +v.toFixed(1)))));
+  const ext = Pl.extentsOf(d);
+  ok(ext.maxX <= 100 + 1e-9 && ext.maxY <= 50 + 1e-9, 'and plot extents leave them out', JSON.stringify(ext));
+}
+
+section('Viewport layer overrides (0.5 VP.3; ADSK_XREC_LAYER_*_OVR)');
+{
+  const { readDwg } = await load('dwg/read.js');
+  const { saveDwg } = await load('dwg-save.js');
+  const { writeDxf2000 } = await load('dxf2000.js');
+  const FX = path.join(ROOT, 'tools/cadcraft-test/fixtures/vp-overrides');   // make.py (ezdxf) + make-dwg.sh (ODA): all six versions
+  const want = '[{"WALLS":{"color":5,"lt":"DASHED","lw":0.7,"tr":50}},{"NOTES":{"color":"#ff8000"}}]';
+  const norm = (d) => JSON.stringify(d.layouts.flatMap((l) => [...l.entities.values()]).filter((e) => e.type === 'viewport' && e.lov).map((e) => Object.fromEntries(Object.entries(e.lov).map(([k, v]) => [k, Object.fromEntries(Object.entries(v).sort())]))));
+  const sorted = JSON.stringify(JSON.parse(want).map((x) => Object.fromEntries(Object.entries(x).map(([k, v]) => [k, Object.fromEntries(Object.entries(v).sort())]))));
+  let d = null;
+  for (const v of ['2000', '2004', '2007', '2010', '2013', '2018']) {
+    const f = path.join(FX, 'vp-overrides-' + v + '.dwg');
+    if (!fs.existsSync(f)) continue;
+    const x = new Doc(); x.load(importDwg(readDwg(new Uint8Array(fs.readFileSync(f))), { versionTag: 'x' }));
+    ok(norm(x) === sorted, 'DWG ' + v + ' (ezdxf → ODA): each viewport\'s overrides read', norm(x));
+    d = x;
+  }
+  if (d) {
+    const lay = d.layouts.find((l) => [...l.entities.values()].some((e) => e.lov));
+    const sheet = Pl.layoutSheet(d, lay), list = Pl.displayList(d, sheet, { mono: false });
+    const [a, b] = [...lay.entities.values()].filter((e) => e.type === 'viewport' && e.lov);
+    const viewOf = (vp) => list.views[sheet.views.findIndex((v) => v.frozen && v.frozen.ovr && [...v.frozen.ovr.keys()].join() === Object.keys(vp.lov).map((k) => k.toUpperCase()).join())];
+    const va = viewOf(a), vb = viewOf(b);
+    const walls = va?.strokes.find((s) => s.color === '#0000ff'), wallsElse = vb?.strokes.find((s) => s.color === '#ff0000');
+    ok(walls && walls.lw === 0.7 && Math.abs(walls.alpha - 0.5) < 0.01 && walls.prims.length > 2 && wallsElse && wallsElse.prims.length === 1, 'plotted: viewport A draws WALLS blue, dashed, 0.70 mm, half transparent; viewport B as the layer is (red, solid)', JSON.stringify([walls && { lw: walls.lw, a: walls.alpha, n: walls.prims.length }, wallsElse && wallsElse.prims.length]));
+    ok(vb?.strokes.some((s) => s.color === '#ff8000') && va?.strokes.some((s) => s.color === '#00ff00'), 'viewport B draws NOTES orange; A keeps it green');
+    for (const v of ['2000', '2018']) {
+      const back = new Doc(); back.load(importDwg(readDwg(saveDwg(d, { version: v }).bytes), { versionTag: 'x' }));
+      ok(norm(back) === sorted, 'saved by CadCraft as DWG ' + v + ' and reopened: the same overrides', norm(back));
+    }
+    ok(writeDxf2000(d).report.notes.includes(EN('dxf.save.vpovr', { n: 2 })) && writeDxf(d).report.notes.includes(EN('dxf.save.vpovr', { n: 2 })), 'DXF does not keep them yet: both DXF saves say so');
+  }
+}
+
+section('XCLIP: clipped block references (0.5 WL.16; xclip.js)');
+{
+  const X = await load('xclip.js');
+  await load('xclip-cmd.js');
+  const { readDwg } = await load('dwg/read.js');
+  const { saveDwg } = await load('dwg-save.js');
+  const { writeDxf2000 } = await load('dxf2000.js');
+  // the clipping itself
+  const sq = [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }, { x: 0, y: 10 }];
+  const l = X.clipLine({ k: 'L', x1: -5, y1: 5, x2: 15, y2: 5 }, sq);
+  ok(l.length === 1 && near(l[0].x1, 0) && near(l[0].x2, 10), 'a line across the clip keeps the part inside');
+  const tri = [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 0, y: 10 }];
+  const a = X.clipArc({ k: 'A', cx: 0, cy: 0, r: 5, a0: -Math.PI / 2, a1: Math.PI }, tri);
+  ok(a.length === 1 && near(a[0].a0, 0, 1e-9) && near(a[0].a1, Math.PI / 2, 1e-9), 'an arc keeps the quarter inside the triangle', JSON.stringify(a));
+  const ring = X.clipRing([5, 5, 15, 5, 15, 15, 5, 15, 5, 5], sq);
+  ok(ring && Math.max(...ring.filter((_, i) => i % 2 === 0)) <= 10 + 1e-9 && ring.length >= 8, 'a fill is cut to the clip (Sutherland–Hodgman)');
+  // the fixture (ezdxf → ODA, six versions)
+  const FX = path.join(ROOT, 'tools/cadcraft-test/fixtures/xclip');
+  let d = null;
+  for (const v of ['2000', '2004', '2007', '2010', '2013', '2018']) {
+    const f = path.join(FX, 'xclip-' + v + '.dwg');
+    if (!fs.existsSync(f)) continue;
+    const x = new Doc(); x.load(importDwg(readDwg(new Uint8Array(fs.readFileSync(f))), { versionTag: 'x' }));
+    const refs = [...x.model.values()].filter((e) => e.type === 'insert' && e.clip);
+    const A = refs.find((e) => e.x === 1000), B = refs.find((e) => e.x === 0);
+    ok(A && B && JSON.stringify(A.clip.pts.map((p) => [p.x, p.y])) === '[[10,10],[60,10],[60,60],[10,60]]' && B.clip.pts.length === 3, 'DWG ' + v + ' (ezdxf → ODA): both references\' clips read, in block coordinates', JSON.stringify(refs.map((e) => e.clip)));
+    d = x;
+  }
+  if (d) {
+    const B = [...d.model.values()].find((e) => e.type === 'insert' && e.x === 0 && e.clip);
+    const strokes = [], texts = [], fills = [];
+    walkFn(d, [B], { stroke: (c, ps) => strokes.push(...ps), text: (c, e) => texts.push(e.s), fill: (c, ls) => fills.push(...ls) });
+    const xs = strokes.flatMap((q) => (q.k === 'L' ? [[q.x1, q.y1], [q.x2, q.y2]] : [])), inTri = (p) => p[0] >= -1e-6 && p[1] >= -1e-6 && p[0] + p[1] <= 100 + 1e-6;
+    ok(xs.length && xs.every(inTri) && fills.length === 1 && texts.length === 1, 'B draws only what lies in its triangle (lines cut; the circle\'s arcs, hatch and text inside kept)', JSON.stringify({ n: xs.length, out: xs.filter((p) => !inTri(p)).slice(0, 3), texts, fills: fills.length }));
+    const A = [...d.model.values()].find((e) => e.type === 'insert' && e.x === 1000);
+    const sheet = Pl.modelSheet(d, { area: { minX: 900, minY: 400, maxX: 1300, maxY: 800 }, paper: 'iso-a3', n: null });
+    const list = Pl.displayList(d, { ...sheet, views: sheet.views.map((v) => ({ ...v, entities: [A] })) });
+    const wc = X.worldClip(A, d.blocks.get(A.block));
+    const ok2 = list.views[0].strokes.flatMap((s) => s.prims).filter((q) => q.k === 'L').length > 0;
+    ok(ok2 && wc.length === 4 && near(Math.hypot(wc[1].x - wc[0].x, wc[1].y - wc[0].y), 100, 1e-6), 'A (scaled 2, turned 30°): its clip turns and scales with it, and the plot is cut to it');
+    // XCLIP command, then DWG and DXF 2000 round trips
+    const h = harness();
+    h.doc.load(importDwg(readDwg(new Uint8Array(fs.readFileSync(path.join(FX, 'xclip-2018.dwg')))), { versionTag: 'x' }));
+    const ref = [...h.doc.model.values()].find((e) => e.type === 'insert' && e.x === 0);
+    h.host.selection = new Set([ref.id]);
+    await h.type('XCLIP', 'N', 'R', '20,20', '80,70');
+    ok(JSON.stringify(h.doc.get(ref.id).clip?.pts.map((p) => [p.x, p.y])) === '[[20,20],[80,20],[80,70],[20,70]]', 'XCLIP N R: a new rectangular clip (block coordinates)');
+    h.doc.undo();
+    ok(h.doc.get(ref.id).clip?.pts.length === 3, 'one undo puts the old clip back');
+    for (const v of ['2000', '2018']) {
+      const back = new Doc(); back.load(importDwg(readDwg(saveDwg(d, { version: v }).bytes), { versionTag: 'x' }));
+      ok([...back.model.values()].filter((e) => e.type === 'insert' && e.clip).length === 2, 'saved as DWG ' + v + ' by CadCraft: both clips come back');
+    }
+    const dt = writeDxf2000(d).text, dd = new Doc(); dd.load(readDxf(dt));
+    ok([...dd.model.values()].filter((e) => e.type === 'insert' && e.clip?.pts.length >= 3).length === 2, 'DXF 2000 round trip keeps the clips (ACAD_FILTER → SPATIAL_FILTER)');
+    const audit = ezdxfAudit(dt);
+    ok(!audit || audit.errors === 0, 'ezdxf audits that DXF without errors', audit && JSON.stringify(audit.messages));
+    ok(writeDxf(d).report.notes.includes(EN('dxf.save.xclip', { n: 2 })), 'DXF R12 cannot clip: said');
+  }
+}
+
+section('XREF Bind: only the clipped part (0.5 WL.17)');
+{
+  const Xr = await load('xref.js');
+  const h = harness();
+  const src = { entities: [
+    { type: 'line', layer: 'Walls', color: null, x1: 0, y1: 50, x2: 100, y2: 50 },
+    { type: 'circle', layer: 'Walls', color: null, cx: 50, cy: 50, r: 30 },
+    { type: 'text', layer: 'Notes', color: null, x: 5, y: 90, h: 4, rot: 0, s: 'OUTSIDE', ha: 'left', va: 'baseline' },
+    { type: 'text', layer: 'Notes', color: null, x: 20, y: 20, h: 4, rot: 0, s: 'INSIDE', ha: 'left', va: 'baseline' },
+    { type: 'hatch', layer: 'Walls', color: null, solid: true, loops: [[30, 30, 70, 30, 70, 70, 30, 70, 30, 30]] },
+  ], layers: [{ name: 'Walls', color: 1 }, { name: 'Notes', color: 3 }], blocks: [], meta: {} };
+  let r;
+  h.doc.change('XATTACH', () => { r = Xr.attachXref(h.doc, src, 'Plan.dwg'); });
+  h.doc.change('x', () => {
+    h.doc.add({ type: 'insert', layer: '0', color: null, block: r.name, x: 0, y: 0, sx: 1, sy: 1, rot: 0, clip: { pts: [{ x: 10, y: 10 }, { x: 60, y: 10 }, { x: 60, y: 60 }, { x: 10, y: 60 }] } });
+    h.doc.add({ type: 'insert', layer: '0', color: null, block: r.name, x: 500, y: 0, sx: 1, sy: 1, rot: 0 });
+  });
+  await h.type('XREF', 'B', 'C');
+  const refs = [...h.doc.model.values()].filter((e) => e.type === 'insert');
+  const clippedRef = refs.find((e) => e.x === 0), whole = refs.find((e) => e.x === 500);
+  const cb = h.doc.blocks.get(clippedRef.block), wb = h.doc.blocks.get(whole.block);
+  const lines = cb.entities.filter((e) => e.type === 'line'), arcs = cb.entities.filter((e) => e.type === 'arc'), texts = cb.entities.filter((e) => e.type === 'text');
+  ok(!Xr.isXrefRoot(wb) && wb.entities.length === 5 && !whole.clip, 'the unclipped reference binds whole');
+  ok(clippedRef.block !== whole.block && !clippedRef.clip && lines.length === 1 && near(lines[0].x1, 10) && near(lines[0].x2, 60) && lines[0].layer === 'Plan$0$Walls', 'the clipped one gets a block of its clipped part: the line cut to 10…60, on the bound layer', JSON.stringify(lines));
+  ok(arcs.length >= 1 && arcs.every((a) => { const m = (a.a0 + a.a1) / 2; const x = a.cx + a.r * Math.cos(m), y = a.cy + a.r * Math.sin(m); return x >= 10 - 1e-6 && x <= 60 + 1e-6 && y >= 10 - 1e-6 && y <= 60 + 1e-6; }), 'the circle becomes the arcs inside the clip');
+  ok(texts.map((e) => e.s).join() === 'INSIDE' && cb.entities.some((e) => e.type === 'hatch' && e.loops[0].every((v) => v >= 10 - 1e-6 && v <= 70 + 1e-6)), 'texts outside are left out; the fill is cut to the clip');
+  h.doc.undo();
+  ok(Xr.isXrefRoot(h.doc.blocks.get(r.name)) && [...h.doc.model.values()].find((e) => e.x === 0)?.clip, 'one undo: the link and its clip are back');
+}
+
+section('Linked drawings: their layers\' settings kept through save, reload and nesting (0.5 WL.15)');
+{
+  const Xr = await load('xref.js');
+  const { readDwg } = await load('dwg/read.js');
+  const { saveDwg } = await load('dwg-save.js');
+  const plan = { entities: [{ type: 'line', layer: 'Walls', color: null, x1: 0, y1: 0, x2: 100, y2: 0 }, { type: 'line', layer: 'Doors', color: null, x1: 0, y1: 10, x2: 10, y2: 10 }],
+    layers: [{ name: 'Walls', color: 1 }, { name: 'Doors', color: 2 }], blocks: [], meta: {} };
+  const g = new Doc();
+  g.change('XATTACH', () => { Xr.attachXref(g, plan, 'Plan.dwg'); g.add({ type: 'insert', layer: '0', color: null, block: 'Plan', x: 0, y: 0, sx: 1, sy: 1, rot: 0 }); });
+  g.setLayer('Plan|Walls', { color: 5, linetype: 'DASHED' });
+  g.setLayer('Plan|Doors', { on: false });
+  g.change('XREF', () => Xr.attachXref(g, plan, 'Plan.dwg', { name: 'Plan' }));   // reload
+  ok(g.layers.get('Plan|Walls').color === 5 && g.layers.get('Plan|Walls').linetype === 'DASHED' && g.layers.get('Plan|Doors').on === false, 'reloading a link keeps the colour, linetype and on/off set on its layers');
+  // saved with the link unloaded (a link CadCraft keeps as a link): the layers keep their names and settings
+  g.change('x', () => Xr.detachXref(g, 'Plan', { keepRefs: true, keepRoot: true }));
+  g.setLayer('Plan|Walls', { color: 5, linetype: 'DASHED' }); g.setLayer('Plan|Doors', { on: false });   // (unloading drops unused layers: set again, as a file would hold them)
+  for (const v of ['2000', '2018']) {
+    const out = saveDwg(g, { version: v }), db = readDwg(out.bytes);
+    const L = db.tables.layers.find((l) => l.name === 'Plan|Walls'), blk = db.blocks.find((b) => b.name === 'Plan');
+    ok(L && (L.flags & 16) && L.color?.index === 5 && blk && (blk.flags & 4), 'DWG ' + v + ': "Plan|Walls" stays a dependent layer of the link (xref-dependent), with its colour', JSON.stringify(L && { n: L.name, f: L.flags, c: L.color }));
+    const re = new Doc(); re.load(importDwg(db, { versionTag: 'x' }));
+    re.change('XREF', () => Xr.attachXref(re, plan, 'Plan.dwg', { name: 'Plan' }));
+    ok(re.layers.get('Plan|Walls')?.color === 5 && re.layers.get('Plan|Doors')?.on === false, 'DWG ' + v + ' reopened and the link reloaded: the settings are still there');
+  }
+  // nested: a host that links G gets G's settings for G's link's layers
+  const gSaved = new Doc(); gSaved.load(importDwg(readDwg(saveDwg(g, { version: '2018' }).bytes), { versionTag: 'x' }));
+  const host = new Doc();
+  host.change('XATTACH', () => Xr.attachXref(host, { entities: [...gSaved.model.values()], layers: [...gSaved.layers.values()], blocks: [...gSaved.blocks.values()], meta: {} }, 'G.dwg'));
+  ok(host.layers.get('G|Plan|Walls')?.color === 5 && host.layers.get('G|Plan|Walls')?.linetype === 'DASHED' && host.layers.get('G|Plan|Doors')?.on === false, 'a host linking G carries G\'s settings for its link\'s layers ("G|Plan|Walls")', JSON.stringify(host.layers.get('G|Plan|Walls')));
+}
+
+section('Frozen in new viewports, in files (0.5 VP.2 file side)');
+{
+  const { readDwg } = await load('dwg/read.js');
+  const { saveDwg } = await load('dwg-save.js');
+  const { writeDxf2000 } = await load('dxf2000.js');
+  const d = new Doc(); d.addLayer({ name: 'Notes', color: 3, newVpFrozen: true }); d.addLayer({ name: 'Walls', color: 1 });
+  const got = (b, n = 'Notes') => [!!b.layers.get(n)?.newVpFrozen, !!b.layers.get(n === 'Notes' ? 'Walls' : 'WALLS')?.newVpFrozen].join();
+  for (const v of ['2000', '2018']) { const b = new Doc(); b.load(importDwg(readDwg(saveDwg(d, { version: v }).bytes), { versionTag: 'x' })); ok(got(b) === 'true,false', 'DWG ' + v + ': a layer frozen in new viewports keeps that (flag 2), the others do not'); }
+  { const b = new Doc(); b.load(readDxf(writeDxf2000(d).text)); ok(got(b) === 'true,false', 'DXF 2000: kept (group 70 bit 2)'); }
+  { const b = new Doc(); b.load(readDxf(writeDxf(d).text)); ok(got(b, 'NOTES') === 'true,false', 'DXF R12: kept'); }
+}
+
+section('UCS and turned views in files (0.5 DR.8 file side)');
+{
+  const { readDwg } = await load('dwg/read.js');
+  const { saveDwg } = await load('dwg-save.js');
+  const { writeDxf2000 } = await load('dxf2000.js');
+  const d = new Doc();
+  d.change('x', () => d.add({ type: 'line', layer: '0', color: null, x1: 0, y1: 0, x2: 100, y2: 0 }));
+  d.ucs = { x: 10, y: 20, ang: Math.PI / 6 }; d.ucsNamed = [{ name: 'Tilted', x: 5, y: 5, ang: Math.PI / 4 }]; d.viewTwist = Math.PI / 6;
+  d.layouts.push({ name: 'S', paper: { w: 420, h: 297, unit: 'mm', x0: 0, y0: 0 }, entities: new Map([[1, { id: 1, type: 'viewport', layer: '0', color: null, x: 200, y: 150, w: 200, h: 150, cx: 50, cy: 0, s: 1, tw: 0.3 }]]) });
+  const same = (b, upper = false) => {
+    const vp = [...(b.layouts[0]?.entities.values() || [])].find((e) => e.type === 'viewport');
+    return b.ucs && near(b.ucs.x, 10) && near(b.ucs.y, 20) && near(b.ucs.ang, Math.PI / 6, 1e-9) && b.ucsNamed.length === 1 && b.ucsNamed[0].name === (upper ? 'TILTED' : 'Tilted')
+      && near(b.ucsNamed[0].ang, Math.PI / 4, 1e-9) && near(b.viewTwist, Math.PI / 6, 1e-9) && vp && near(vp.tw, 0.3, 1e-9);
+  };
+  for (const v of ['2000', '2004', '2018']) { const b = new Doc(); b.load(importDwg(readDwg(saveDwg(d, { version: v }).bytes), { versionTag: 'x' })); ok(same(b), 'DWG ' + v + ': the current UCS, the named UCS, the turned view and the twisted viewport come back'); }
+  { const t2 = writeDxf2000(d).text, b = new Doc(); b.load(readDxf(t2)); ok(same(b), 'DXF 2000: the same'); const a = ezdxfAudit(t2); ok(!a || a.errors === 0, 'ezdxf audits it without errors'); }
+  { const b = new Doc(); b.load(readDxf(writeDxf(d).text)); ok(same(b, true), 'DXF R12: the same (the UCS name in capitals, as R12 names are)'); }
+  const plain = new Doc(); plain.change('x', () => plain.add({ type: 'line', layer: '0', color: null, x1: 0, y1: 0, x2: 1, y2: 0 }));
+  const pb = readDwg(saveDwg(plain, { version: '2018' }).bytes);
+  ok(!pb.tables.ucs?.length && pb.tables.vports.filter((x) => /^\*active$/i.test(x.name)).every((x) => !x.twist), 'a drawing in the world UCS with a level view writes no UCS and no twist');
+}
+
 section('Plot to PDF');
 async function pdfCheck(bytes, name) {
   const head = new TextDecoder().decode(bytes.subarray(0, 8));
@@ -2673,6 +3960,62 @@ async function pdfCheck(bytes, name) {
   const lp = await Pl.toPdf(llist);
   const info = await pdfCheck(lp.bytes, 'layout plot');
   if (info) ok(/1190\.55 x 841\.89/.test(info), 'the layout plots on A3 (1190.55 × 841.89 pt)');
+}
+
+// ---------------------------------------------------------------------------
+section('Properties › Custom for dynamic block references (0.5 DB.3; propdefs.js)');
+{
+  const { readDwg } = await load('dwg/read.js');
+  const P = await load('propdefs.js');
+  const file = '/var/www/CADCRAFT/testfiles/dwg-samples/blocks_and_tables_-_imperial.dwg';
+  if (fs.existsSync(file)) {
+    const d = new Doc(); d.load(importDwg(readDwg(new Uint8Array(fs.readFileSync(file))), { versionTag: 'AC1021' }));
+    d.setSpace(null);
+    const refs = [...d.model.values()].filter((e) => e.type === 'insert' && e.dyn);
+    const duplex = refs.find((e) => e.block === 'Receptacle' && e.dyn.state === 'Duplex');
+    const ctx = { doc: d };
+    const defs = P.defsFor('insert', [duplex], ctx);
+    const vis = defs.find((x) => x.key === 'dyn.vis');
+    ok(vis && vis.sec === 'custom' && vis.label === 'Visibility' && vis.choices(ctx).map((c) => c[0]).join('|') === 'Duplex|GFI' && P.valueOf(vis, [duplex], ctx) === 'Duplex', 'Custom: the visibility state as a list of the block\'s states, the current one shown');
+    ok(!defs.some((x) => x.key === 'dyn' && x.sec === 'misc'), 'the old "No parameters" line is gone for a dynamic block');
+    const steps = d.undoStack.length;
+    const r = P.applyValue(d, vis, [d.model.get(duplex.id)], 'GFI', ctx);
+    ok(r.ok && d.model.get(duplex.id).dyn.state === 'GFI' && d.undoStack.length === steps + 1, 'choosing GFI switches it: one undo step', JSON.stringify(r));
+    {   // DB.12: the switched state survives a save in every DWG version (dynamic in its own, a plain block showing GFI in the others)
+      const { saveDwg } = await load('dwg-save.js');
+      const pos = { x: duplex.x, y: duplex.y };
+      const res = [];
+      for (const ver of ['2000', '2004', '2007', '2010', '2013', '2018']) {
+        const { bytes } = saveDwg(d, { version: ver });
+        const d2 = new Doc(); d2.load(importDwg(readDwg(bytes)));
+        const r2 = [...d2.model.values()].find((e) => e.type === 'insert' && Math.abs(e.x - pos.x) < 1e-6 && Math.abs(e.y - pos.y) < 1e-6 && (d2.blocks.get(e.block)?.entities || []).some((x) => x.type === 'text'));
+        res.push(ver + ':' + (r2 ? (r2.dyn ? 'dyn-' + r2.dyn.state : 'plain') : 'lost'));
+      }
+      ok(res.every((x) => !x.endsWith('lost')) && res.includes('2007:dyn-GFI'), 'GFI saved in all six DWG versions: dynamic in 2007 (its own), shown as GFI in the others', res.join(' '));
+    }
+    d.undo();
+    ok(d.model.get(duplex.id).dyn.state === 'Duplex', 'and undo puts Duplex back');
+    const toil = [...d.model.values()].filter((e) => e.type === 'insert' && e.dyn && e.dyn.values?.some((v) => v.kind !== 'visibility'));
+    const ro = toil.length ? P.defsFor('insert', [toil[0]], ctx).filter((x) => x.sec === 'custom' && x.key !== 'dyn.vis') : [];
+    ok(ro.length > 0 && ro.every((x) => !x.set && (x.kind === 'ro' || x.kind === 'ro-len')), 'the other parameter values show read-only', JSON.stringify(ro.map((x) => [x.label, P.valueOf(x, [toil[0]], ctx)])));
+    const two = refs.filter((e) => d.blocks.get(e.block)?.dyn && (e.block === duplex.block || d.blocks.get(e.block).dyn.of === 'Receptacle')).slice(0, 2);
+    if (two.length === 2) ok(P.defsFor('insert', two, ctx).some((x) => x.key === 'dyn.vis'), 'two references of the same block: one list for both');
+    const other = refs.find((e) => (d.blocks.get(e.block)?.dyn?.of || e.block) !== 'Receptacle' && P.defsFor('insert', [e], ctx).some((x) => x.key === 'dyn.vis'));
+    if (other) ok(!P.defsFor('insert', [duplex, other], ctx).some((x) => x.key === 'dyn.vis'), 'references of different blocks: no list (their states differ)');
+    const plain = [...d.model.values()].find((e) => e.type === 'insert' && !d.blocks.get(e.block)?.dyn);
+    if (plain) ok(!P.defsFor('insert', [plain], ctx).some((x) => x.sec === 'custom'), 'a plain block: no Custom section');
+    // DB.5: grips where AutoCAD draws them
+    const DG = await load('dyngrips.js');
+    const gv = DG.dynGrips(d, d.model.get(duplex.id));
+    const visG = gv.find((g) => g.key === 'dyn:vis');
+    const B = d.blocks.get(duplex.block), m = G.insertMatrix(duplex, B), vp = B.dyn?.vis?.point || d.blocks.get(B.dyn.of)?.dyn?.vis?.point;
+    ok(visG && visG.shape === 'vis' && (!vp || nearPt(visG, G.mApply(m, vp).x, G.mApply(m, vp).y, 1e-6)), 'DB.5: the visibility grip, at its parameter\'s point placed by the reference', JSON.stringify(visG));
+    const withVals = [...d.model.values()].filter((e) => e.type === 'insert' && e.dyn?.values?.some((v) => v.kind === 'linear' || v.kind === 'flip'));
+    const gs = withVals.flatMap((e) => DG.dynGrips(d, e));
+    ok(gs.some((g) => g.shape === 'arrow') || gs.some((g) => g.shape === 'flip') || !withVals.length, 'linear grips as arrows / flip grips where the values put them', JSON.stringify(gs.slice(0, 3)));
+    ok(DG.dynGripActs('dyn:vis') && !DG.dynGripActs(gs[0]?.key || 'dyn:1:p2'), 'only the visibility grip acts today (the rest say so)');
+    ok(!plain || DG.dynGrips(d, plain).length === 0, 'a plain block has none');
+  } else console.log('  (no sample DWG: skipped)');
 }
 
 // ---------------------------------------------------------------------------
@@ -3138,7 +4481,7 @@ function fixtureItem(version = 1, wide = 2286) {
 {
   // dwg/: byte-identical copies of the cc-dwg reader and writer files (node tools/dwg-test/writer-sync.mjs cadcraft)
   {
-    const { READ_WRITE_FILES: READER_FILES } = await import(pathToFileURL(path.join(ROOT, 'tools/dwg-test/writer-sync.mjs')).href);
+    const { CADCRAFT_FILES: READER_FILES } = await import(pathToFileURL(path.join(ROOT, 'tools/dwg-test/writer-sync.mjs')).href);
     const differ = READER_FILES.filter((f) => !fs.existsSync(path.join(APP, 'dwg', f)) || !fs.readFileSync(path.join(ROOT, 'lib/dwg', f)).equals(fs.readFileSync(path.join(APP, 'dwg', f))));
     const extra = fs.existsSync(path.join(APP, 'dwg')) ? fs.readdirSync(path.join(APP, 'dwg')).filter((f) => f.endsWith('.js') && !READER_FILES.includes(f)) : [];
     ok(!differ.length && !extra.length, 'dwg/ holds byte-identical copies of the ' + READER_FILES.length + ' lib/dwg files the reader and writer need', [...differ.map((f) => 'differs: ' + f), ...extra.map((f) => 'not needed: ' + f)].join(', ') + (differ.length + extra.length ? ' (node tools/dwg-test/writer-sync.mjs cadcraft)' : ''));
@@ -3174,6 +4517,77 @@ function fixtureItem(version = 1, wide = 2286) {
       }
     }
   } else console.log('  (bimcraft/dev/libitem.js not there yet — copy check skipped)');
+}
+
+section('Standard tab: steel sections and standard parts (stdlib.js, shapes/; 0.5 MQ.3, MQ.4)');
+{
+  const Sd = await load('stdlib.js');
+  const M3 = await load('model3d.js');
+  const { commandRegistry } = await load('commands.js');
+  const Li = await load('libitem.js');
+  ok(Sd.FAMILIES.length === 20 && Sd.FAMILIES.filter((f) => f.group === 'sections').length === 10, '20 families on the tab: 10 of sections, 10 of parts', Sd.FAMILIES.length);
+  const w12 = Sd.standardCards('sec:W', 'w12', 100);
+  ok(w12.total === 29 && w12.cards.every((c) => /^W12x/.test(c.name)), 'searching W shapes for "w12" finds the 29 W12 sizes', w12.total + ' ' + w12.cards.map((c) => c.name).join(','));
+  ok(Sd.standardCards('part:iso15', '6205').total === 1 && Sd.standardCards('part:iso15', '').total === 33, 'bearings: 33 sizes, "6205" finds one');
+  const sec = Sd.cardItem('sec:W', 'W12x26', { view: 'section' });
+  ok(sec.ok && Li.validateItem(sec.item, { partial: true }).ok && sec.item.license.id === 'CC0-1.0' && sec.item.provenance.library === 'standard', 'a section card is a valid CC0 library item made in the page', JSON.stringify(sec.ok ? Li.validateItem(sec.item, { partial: true }).errors : sec));
+  ok(!Sd.cardItem('sec:W', 'W12x26', { view: 'elevation', length: -5 }).ok && Sd.cardItem('part:iso4017', 'M10', { length: 2 }).field === 'length', 'out-of-range options are refused with the field named');
+  {
+    const { doc, type, host } = harness();
+    host.library = async () => ({ item: sec.item, slug: 'W12x26-s' });
+    await type('I', 'L', '0,0', '');
+    const ins = doc.all().pop(), blk = doc.blocks.get(ins?.block);
+    const pb = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+    for (const e of blk?.entities || []) if (e.layer === 'STEEL') { const b = G.entityBounds(e, doc.blocks); pb.minX = Math.min(pb.minX, b.minX); pb.minY = Math.min(pb.minY, b.minY); pb.maxX = Math.max(pb.maxX, b.maxX); pb.maxY = Math.max(pb.maxY, b.maxY); }
+    ok(ins?.block === 'LIB_w12x26-s_v1' && near(pb.maxX - pb.minX, 6.49 * 25.4, 1e-6) && near(pb.maxY - pb.minY, 12.2 * 25.4, 1e-6) && near(pb.minX + pb.maxX, 0, 1e-9), 'INSERT L: the W12x26 section is a block whose outline is 164.8 × 309.9 mm (bf × d), centred', ins?.block + ' ' + JSON.stringify(pb));
+    ok(ins.attrs['CC-PART-SIZE'] === 'W12x26' && ins.attrs['CC-PART-STD'] === 'AISC Shapes Database v16.0' && ins.attrs['CC-PART-TYPE'] === 'W shape' && blk.attdefs.some((d) => d.tag === 'CC-PART-MATERIAL'), 'its CC-PART-* fields are attributes (type, standard, size, material)', JSON.stringify(ins.attrs).slice(0, 300));
+    const el = Sd.cardItem('sec:HSS', 'HSS6x6x1/4', { view: 'elevation', length: 3000 });
+    host.library = async () => ({ item: el.item, slug: 'hss6x6x1-4-e3000' });
+    doc.meta.units = 'inches';
+    await type('I', 'L', '0,100', '');
+    const e2 = doc.all().pop(), b2 = G.entityBounds({ ...e2, attrs: {} }, doc.blocks);
+    ok(near(b2.maxX - b2.minX, 3000 / 25.4 + 2 * 38.1 / 25.4, 1e-6) && near(b2.maxY - b2.minY, 6, 1e-9) && e2.attrs['CC-PART-LENGTH'] === '3000', 'an elevation 3000 mm long in an inch drawing: 118.1 in + its centre line, 6 in deep; the length is an attribute', JSON.stringify(b2));
+    // parts and the parts list
+    doc.meta.units = '';
+    const bolt = Sd.cardItem('part:iso4017', 'M10', { length: 30 }), nut = Sd.cardItem('part:iso4032', 'M10', {});
+    host.library = async () => ({ item: bolt.item, slug: 'iso4017-M10x30' });
+    await type('I', 'L', '500,0', '', 'I', 'L', '520,0', '', 'I', 'L', '540,0', '');
+    host.library = async () => ({ item: nut.item, slug: 'iso4032-M10' });
+    await type('I', 'L', '600,0', '');
+    const b3 = doc.all().filter((e) => e.type === 'insert' && e.attrs['CC-PART-STD'] === 'ISO 4017');
+    ok(b3.length === 3 && b3[0].attrs['CC-PART-SIZE'] === 'M10 × 30' && b3[0].attrs['CC-PART-MATERIAL'] === 'Steel, property class 8.8' && Number(b3[0].attrs['CC-WEIGHT-KG']) > 0.02, 'a hex head screw ISO 4017 M10 × 30: size, standard, material and weight as attributes', JSON.stringify(b3[0]?.attrs).slice(0, 400));
+    const rows = Sd.partsList(doc);
+    const r4017 = rows.find((r) => r.std === 'ISO 4017');
+    ok(rows.length === 4 && r4017.qty === 3 && r4017.numbers.length === 3 && rows.some((r) => r.type === 'Hex nut' && r.qty === 1), 'the parts list groups the three screws (qty 3, their item numbers) and lists the nut, the section and the elevation', JSON.stringify(rows));
+    const csv = Sd.partsCsv(rows);
+    ok(csv.startsWith('﻿Item,Qty,Part,Standard,Size,Length (mm),Material,Mass (kg)\r\n') && csv.includes('ISO 4017'), 'parts list CSV: BOM, header, rows', csv.slice(0, 120));
+    // DXF keeps them
+    const back = readDxf(writeDxf(doc).text);
+    const d2 = new Doc(); d2.load(back);
+    ok(Sd.partsList(d2).length === 4 && Sd.partsList(d2).find((r) => r.std === 'ISO 4017').qty === 3, 'saved as DXF and read back: the same parts list');
+    // PARTSLIST and STEELMEMBER (registered by the library panel in the page; here by hand)
+    Sd.installStandard(commandRegistry.add, commandRegistry.option);
+    const n0 = doc.count(), u0 = doc.undoStack.length;
+    await type('PARTSLIST', '0,-500', '');
+    const added = doc.count() - n0;
+    ok(added > 20 && doc.undoStack.length === u0 + 1 && doc.all().some((e) => e.type === 'text' && e.s === 'M10 × 30'), 'PARTSLIST draws the table (lines and text) at the picked corner in one undo step', added);
+    doc.undo();
+    ok(doc.count() === n0, 'one undo removes the table');
+    await type('STEELMEMBER', 'W12x26', '0,0', '6000,0');
+    let ss = M3.solidsOf(doc.model3d);
+    const Shp0 = await load('shapes/sections.js'), wv = Shp0.exactArea(Sd.findSection('W12x26')) * 1e-6 * 6;
+    ok(ss.length === 1 && ss[0].closed && near(ss[0].volume, wv, 0.002 * wv), 'STEELMEMBER W12x26 from 0,0 to 6000,0 (mm drawing): a closed solid of the section area × 6 m (fillets as chords)', JSON.stringify(ss[0]) + ' vs ' + wv);
+    ok(near(ss[0].bbox.min[2], 0, 1e-9) && near(ss[0].bbox.max[2], 12.2 * 0.0254, 1e-6) && near(ss[0].bbox.max[0] - ss[0].bbox.min[0], 6, 1e-6), 'the beam sits on the ground, 309.9 mm deep, 6 m long along X', JSON.stringify(ss[0].bbox));
+    await type('STEELMEMBER', 'HSS6x6x1/4', 'C', '1000,1000', '3000');
+    ss = M3.solidsOf(doc.model3d);
+    const hss = Sd.findSection('HSS6x6x1/4'), Shp = await load('shapes/sections.js');
+    ok(ss.length === 2 && ss[1].closed && near(ss[1].volume, Shp.exactArea(hss) * 1e-6 * 3, 0.005 * Shp.exactArea(hss) * 1e-6 * 3) && near(ss[1].bbox.max[2], 3, 1e-9), 'Column option: an HSS6x6x1/4 3 m high, hollow (its volume = the wall area × 3 m)', JSON.stringify(ss[1]));
+    doc.undo();
+    ok(M3.solidsOf(doc.model3d).length === 1, 'a member is one undo step');
+    const h2 = harness();
+    await h2.type('STEELMEMBER', 'W99x1');
+    ok(h2.log.some((l) => /No steel section is called "W99x1"/.test(l)) && M3.solidsOf(h2.doc.model3d).length === 0, 'an unknown size is refused in words, nothing made');
+  }
 }
 
 section('DWG / DXF files');

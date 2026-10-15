@@ -35,6 +35,9 @@ import { forFile3d, M3D_BLOCK } from './model3d.js';
 import { t } from './i18n.js';
 import { vportRecords } from './dwg-vports.js';
 import { trWord, propsXdata, varsOf, dstyleItems, ccDimItems } from './dwg-props.js';
+import { dynSave } from './dyn-blocks.js';
+import { picturePlacement, pictureKey } from './pictures.js';
+import { clipPoly, filterOf } from './xclip.js';
 
 /** The versions Save as offers (newest first). The writer does all six; 2000 opens in every program. */
 export const DWG_VERSIONS = Object.freeze([
@@ -76,15 +79,28 @@ export function saveDwg(doc, { version = '2000', created = new Date(), modelOnly
 
   // linetypes and lineweights (0.4 C8): DWG keeps lineweights in 1/100 mm (-1 by layer, -2 by block, -3 default)
   const lw100 = (w, absent) => (w === undefined || w === null ? absent : w < 0 ? w : Math.round(w * 100));
-  const usedLt = new Set();
+  const usedLt = new Set(), ltHandles = new Map();   // ltHandles: a source handle for the linetypes VP.3 names by handle
   const ltOf = (n) => { if (n && !/^(bylayer|byblock|continuous)$/i.test(n)) usedLt.add(n); return n || 'ByLayer'; };
-  const layers = [...doc.layers.values()].map((l) => ({ name: l.name, color: color(l.color || 7), off: !l.on, frozen: !!l.frozen, locked: !!l.locked, plot: l.plot !== false,
+  const layers = [...doc.layers.values()].map((l) => ({ name: l.name, color: color(l.color || 7), off: !l.on, frozen: !!l.frozen, locked: !!l.locked, plot: l.plot !== false, frozenInNewViewports: !!l.newVpFrozen,
     linetype: ltOf(l.linetype || 'Continuous'), lineweight: lw100(l.lineweight, -3) }));
 
   // Blocks to write: every named one, and unnamed ones a reference uses (dimension blocks are made fresh below).
   const everything = [...doc.everyEntity(), ...[...doc.blocks.values()].flatMap((b) => b.entities)];
   const insertUsed = new Set(everything.filter((e) => e.type === 'insert').map((e) => e.block));
   const blocks = [];
+  // dynamic blocks (dyn-blocks.js, 0.5 DB.2): their records, every file entity and the file's objects go back as they came
+  const ds = modelOnly ? null : dynSave(doc);
+  const dynRecords = [];
+  const vpOverrides = [];   // VP.3: [{ h (the viewport's handle here), lov }]
+  const clipObjects = [];   // WL.16: each clipped reference's dictionaries and SPATIAL_FILTER
+  // pictures (0.5 WL.14, pictures.js): each reference to a picture block is an IMAGE; one IMAGEDEF per file
+  const picDefs = new Map(), picObjects = [];
+  const picDef = (file, size) => {
+    const k = pictureKey(file) || 'image';
+    if (!picDefs.has(k)) { const h = 'CC' + (0x7A000000 + picDefs.size).toString(16).toUpperCase(); picDefs.set(k, h); picObjects.push({ handle: h, type: 'IMAGEDEF', fileName: String(file || 'image'), size, loaded: true, classVersion: 0, resUnits: 0, pixelSize: { x: 1, y: 1 } }); }
+    return picDefs.get(k);
+  };
+  if (ds?.dropped) note('dynDropped', ds.dropped);
   let dimN = 0;
 
   /** One CadCraft entity → cc-dwg model entities (most give one). */
@@ -107,6 +123,11 @@ export function saveDwg(doc, { version = '2000', created = new Date(), modelOnly
       case 'circle': return [{ ...base, type: 'CIRCLE', center: P(e.cx, e.cy, z), radius: e.r }];
       case 'arc': return [{ ...base, type: 'ARC', center: P(e.cx, e.cy, z), radius: e.r, startAngle: e.a0, endAngle: e.a1 }];
       case 'point': return [{ ...base, type: 'POINT', position: P(e.x, e.y, z) }];
+      case 'xline': case 'ray': {   // construction lines (0.5 DR.7): as themselves, every version
+        const n = Math.hypot(e.dx, e.dy);
+        if (!(n > 0) || !Number.isFinite(e.x) || !Number.isFinite(e.y)) return [];
+        return [{ ...base, type: e.type === 'xline' ? 'XLINE' : 'RAY', start: P(e.x, e.y, z), direction: P(e.dx / n, e.dy / n) }];
+      }
       case 'poly': {
         // widths (P.7): one global width, or per segment (start / end) when any vertex has its own
         const each = e.pts.some((p) => Number.isFinite(p.sw) || Number.isFinite(p.ew)), g = Number.isFinite(e.w) && e.w > 0 ? e.w : 0;
@@ -118,10 +139,38 @@ export function saveDwg(doc, { version = '2000', created = new Date(), modelOnly
       case 'hatch': return e.wipe ? [] : hatch(e, base);   // a dimension's text background: DIMTFILL says it (the reader draws it)
       case 'insert': {
         const blk = doc.blocks.get(e.block);
+        const pic = !modelOnly && blk ? picturePlacement(e, blk) : null;
+        if (pic) {   // a picture: IMAGE (+ its IMAGEDEF), clipped to its frame when it has a clip
+          note('picture');
+          return [{ ...base, type: 'IMAGE', insert: P(pic.insert.x, pic.insert.y, z), u: P(pic.u.x, pic.u.y), v: P(pic.v.x, pic.v.y), size: pic.size, def: picDef(pic.file, pic.size),
+            displayFlags: 7, brightness: 50, contrast: 50, fade: pic.fade | 0, ...(pic.clip ? { clipping: true, clipType: 2, clip: pic.clip } : { clipping: false, clip: [] }) }];
+        }
         const atts = blk && e.attrs && Object.keys(e.attrs).length ? worldAttribs(e, blk) : [];
+        // a dynamic block reference: its handle and representation data (a copied one gets its own; a switched state is
+        // written into it — dyn-blocks.js)
+        const dr = e.dyn && ds ? ds.ref(e) : null;
+        // a clipped reference (XCLIP, WL.16): xdict → ACAD_FILTER → SPATIAL → SPATIAL_FILTER (DXF 2000 writes it from `xclip`)
+        const cp = clipPoly(e);
+        let clipRef = null;
+        if (cp && modelOnly) clipRef = { xclip: { pts: cp } };
+        else if (cp && dr?.extDict) note('clipDyn');
+        else if (cp) {
+          const fh = () => 'CC' + (0x7F000000 + clipObjects.length).toString(16).toUpperCase() + 'X';
+          const ih = dr?.handle || fh() + 'I';
+          const xd = fh(); clipObjects.push(null);
+          const d2 = fh(); clipObjects.push(null);
+          const sf = fh(); clipObjects.push(null);
+          clipObjects.splice(clipObjects.length - 3, 3,
+            { handle: xd, owner: ih, reactors: [ih], type: 'DICTIONARY', entries: { ACAD_FILTER: d2 }, hardOwner: 1, cloning: 1 },
+            { handle: d2, owner: xd, reactors: [xd], type: 'DICTIONARY', entries: { SPATIAL: sf }, hardOwner: 1, cloning: 1 },
+            { ...filterOf({ pts: cp }), handle: sf, owner: d2, reactors: [d2] });
+          clipRef = { handle: ih, extDict: xd };
+        }
         return [{
           ...base, type: 'INSERT', block: e.block, insert: P(e.x, e.y, z), scale: { x: e.sx ?? 1, y: e.sy ?? 1, z: Number.isFinite(e.sz) && e.sz !== 0 ? e.sz : 1 }, rotation: e.rot || 0,
           attribs: atts.map((t) => ({ ...textFields(t, oneLine(t.s ?? '')), layer: t.layer || e.layer || '0', color: color(t.color), tag: t.tag, flags: t.invisible ? 1 : 0 })),
+          ...(dr ? { handle: dr.handle, ...(dr.extDict ? { extDict: dr.extDict } : {}) } : {}),
+          ...(clipRef || {}),
         }];
       }
       case 'dim': return dimension(e, base);
@@ -168,7 +217,7 @@ export function saveDwg(doc, { version = '2000', created = new Date(), modelOnly
   /** One line and no wrap width → TEXT; otherwise MTEXT (AutoCAD wraps it again from the width). */
   function text(e, base) {
     const s = String(e.s ?? '');
-    if (!s.includes('\n') && !(e.ww > 0)) return { ...base, type: 'TEXT', ...textFields(e, s) };
+    if (!s.includes('\n') && !(e.ww > 0) && !e.bgm) return { ...base, type: 'TEXT', ...textFields(e, s) };   // a background mask needs MTEXT (WL.8)
     if (e.wf && e.wf !== 1) note('mtextwidth');
     const lay = textLayout(e);
     // MTEXT has no "baseline" attachment: hang it from the top instead, one text height above the first baseline
@@ -179,7 +228,15 @@ export function saveDwg(doc, { version = '2000', created = new Date(), modelOnly
     const r = e.rot || 0, z = Number.isFinite(e.z) ? e.z : 0;
     return { ...base, type: 'MTEXT', insert: P(at.x, at.y, z), xAxis: P(Math.cos(r), Math.sin(r)), rotation: r, height: e.h, width: e.ww > 0 ? e.ww : 0,
       attach: ROW[va] * 3 + (COL[e.ha] ?? 0) + 1, value: body, lineSpacing: e.ls || 1, lineSpacingStyle: 1, extWidth: lay.box.w, extHeight: lay.box.h,
-      ...(e.style && !/^standard$/i.test(e.style) ? { style: textStyle(e.style) } : {}) };
+      ...(e.style && !/^standard$/i.test(e.style) ? { style: textStyle(e.style) } : {}), ...maskFields(e.bgm) };
+  }
+  /** A text's background mask (0.5 WL.8) → MTEXT's background fields: 1 = fill, + 2 = the drawing window's colour. */
+  function maskFields(m) {
+    if (!m || typeof m !== 'object') return {};
+    if (vkey === '2000' && !modelOnly) { note('mask2000'); return {}; }   // a 2000 DWG has no MTEXT background (DXF 2000 carries groups 90/63/45)
+    const win = m.color === 'bg';
+    return { backgroundFlags: win ? 3 : 1, backgroundScale: Number.isFinite(m.scale) && m.scale >= 1 && m.scale <= 5 ? m.scale : 1.5,
+      backgroundColor: win ? { index: 7 } : color(m.color ?? 7), backgroundTransparency: 0 };
   }
 
   /** Solid fill → HATCH SOLID (a 3- or 4-cornered single ring → SOLID); a pattern → HATCH with the pattern's own lines. */
@@ -280,7 +337,12 @@ export function saveDwg(doc, { version = '2000', created = new Date(), modelOnly
   function viewport(e, base, id = 0) {
     // status (DXF 90): 0x8060 as AutoCAD writes it; + 16384 display locked, + 131072 viewport off (P.7)
     const status = 0x8060 | (e.locked ? 16384 : 0) | (e.on === false ? 131072 : 0);
-    return { ...base, type: 'VIEWPORT', center: P(e.x, e.y), width: e.w, height: e.h, viewCenter: P(e.cx, e.cy), viewTarget: P(0, 0), viewHeight: e.h / (e.s > 0 ? e.s : 1), id, status };
+    const frz = Array.isArray(e.frz) ? e.frz.filter((n) => typeof n === 'string' && n) : [];   // layers frozen in it (VP.1): names, cc-dwg finds the records
+    // its layer overrides (VP.3) go into the layers' XRECORDs, which name this viewport by handle
+    const lov = !modelOnly && e.lov && typeof e.lov === 'object' && Object.keys(e.lov).length ? e.lov : null;
+    const vh = lov ? 'CC' + (0x7C000000 + vpOverrides.length).toString(16).toUpperCase() : null;
+    if (lov) vpOverrides.push({ h: vh, lov });
+    return { ...base, ...(vh ? { handle: vh } : {}), ...(Number.isFinite(e.tw) && e.tw ? { twist: e.tw } : {}), type: 'VIEWPORT', center: P(e.x, e.y), width: e.w, height: e.h, viewCenter: P(e.cx, e.cy), viewTarget: P(0, 0), viewHeight: e.h / (e.s > 0 ? e.s : 1), id, status, ...(frz.length ? { frozenLayers: frz } : {}) };
   }
 
   for (const b of doc.blocks.values()) {
@@ -290,6 +352,22 @@ export function saveDwg(doc, { version = '2000', created = new Date(), modelOnly
     if (isXrefRoot(b)) note('xrefBound');
     const attdefs = (b.attdefs || []).map((d) => ({ ...textFields(d, oneLine(d.def || '')), type: 'ATTDEF', layer: d.layer || '0', color: color(d.color), tag: d.tag, prompt: d.prompt || '',
       flags: (d.invisible ? 1 : 0) | (d.constant ? 2 : 0) | (d.preset ? 8 : 0) }));
+    const dyn = ds?.blocks.get(b.name);
+    if (dyn) {
+      // every file entity in file order with its handle (the parameters name them), hidden ones flagged invisible;
+      // attribute definitions where they were
+      const adAt = new Map((dyn.ad || []).map((i, k) => [i, attdefs[k]]));
+      const ents = dyn.all.flatMap((parts, i) => {
+        const out = adAt.has(i) ? [adAt.get(i)] : parts.flatMap(conv);
+        if (out[0] && dyn.h[i]) out[0].handle = dyn.h[i];
+        if (!dyn.shown[i]) for (const x of out) x.invisible = true;
+        return out;
+      });
+      const record = ds.record(b.name);
+      blocks.push({ name: b.name, record, base: P(b.base?.x || 0, b.base?.y || 0), entities: ents });
+      dynRecords.push({ handle: record, name: b.name, ...(dyn.x ? { extDict: dyn.x } : {}), ...(dyn.xd ? { xdata: dyn.xd } : {}) });
+      continue;
+    }
     blocks.push({ name: b.name, base: P(b.base?.x || 0, b.base?.y || 0), entities: [...b.entities.flatMap(conv), ...attdefs] });
   }
   // constraints + parameters (gcons.js): CADCRAFT xdata "CCREF:<key>" on each constrained entity, block CADCRAFT_PARAMETRIC
@@ -340,23 +418,61 @@ export function saveDwg(doc, { version = '2000', created = new Date(), modelOnly
   const header = { INSUNITS: unitCode(units), MEASUREMENT: IMPERIAL.has(units) ? 0 : 1, LUNITS: doc.meta.lunits || 2 };
   if (Number.isFinite(doc.meta.luprec)) header.LUPREC = doc.meta.luprec;
   if (doc.meta.insbase) header.INSBASE = P(doc.meta.insbase.x || 0, doc.meta.insbase.y || 0);
+  // the current UCS and the named ones (DR.8; ucs.js { x, y, ang }): $UCSORG / $UCSXDIR / $UCSYDIR and the UCS table
+  const axes = (u) => ({ origin: P(u.x, u.y), xAxis: P(Math.cos(u.ang), Math.sin(u.ang)), yAxis: P(-Math.sin(u.ang), Math.cos(u.ang)) });
+  if (doc.ucs) { const a = axes(doc.ucs); header.UCSORG = a.origin; header.UCSXDIR = a.xAxis; header.UCSYDIR = a.yAxis; }
+  const ucsTable = (doc.ucsNamed || []).map((u) => ({ name: u.name, ...axes(u) }));
   if (validBounds(ext)) { header.EXTMIN = P(ext.minX, ext.minY); header.EXTMAX = P(ext.maxX, ext.maxY); }
   // named views: model views as they are; a sheet's as a paper-space view
   const views = (doc.views || []).map((v) => ({ name: v.name, center: { x: v.cx, y: v.cy }, width: v.w, height: v.h, target: P(0, 0), direction: P(0, 0, 1), paperSpace: !!v.layout }));
   if (views.some((v) => v.paperSpace)) note('paperView', views.filter((v) => v.paperSpace).length);
 
+  // per-viewport layer overrides (0.5 VP.3): XRECORDs ADSK_XREC_LAYER_*_OVR in each layer's extension dictionary, as
+  // dwg-import.js reads them (viewport handle 335, then 420 colour word / 343 linetype / 91 lineweight / 440 transparency)
+  const ovrObjects = [];
+  if (vpOverrides.length) {
+    const ltH = new Map();
+    const KINDS = [['COLOR', 'ADSK_LYR_COLOR_OVERRIDE', (o) => (o.color === undefined || o.color === null ? null : [420, typeof o.color === 'string' ? (0xc2000000 | (parseInt(o.color.slice(1), 16) & 0xffffff)) | 0 : (0xc3000000 | (o.color & 0xff)) | 0])],
+      ['LINETYPE', 'ADSK_LYR_LINETYPE_OVERRIDE', (o) => (o.lt ? [343, ltH.get(ltOf(o.lt)) || (ltH.set(o.lt, 'CC' + (0x7D000000 + ltH.size).toString(16).toUpperCase()), ltH.get(o.lt))] : null)],
+      ['LINEWT', 'ADSK_LYR_LINEWT_OVERRIDE', (o) => (Number.isFinite(o.lw) && o.lw >= 0 ? [91, Math.round(o.lw * 100)] : null)],
+      ['ALPHA', 'ADSK_LYR_ALPHA_OVERRIDE', (o) => (Number.isFinite(o.tr) ? [440, trWord(o.tr) | 0] : null)]];
+    let k = 0;
+    const h = () => 'CC' + (0x7E000000 + k++).toString(16).toUpperCase();
+    for (const L of layers) {
+      const entries = {}, recs = [];
+      for (const [kind, tag, val] of KINDS) {
+        const data = [];
+        for (const { h: vh, lov } of vpOverrides) {
+          const o = Object.entries(lov).find(([n]) => n.toUpperCase() === L.name.toUpperCase())?.[1];
+          const g = o && val(o);
+          if (g) data.push([335, vh], g);
+        }
+        if (data.length) { const xh = h(); entries['ADSK_XREC_LAYER_' + kind + '_OVR'] = xh; recs.push({ handle: xh, type: 'XRECORD', data: [[102, '{' + tag], ...data, [102, '}']], cloning: 1 }); }
+      }
+      if (!recs.length) continue;
+      L.handle = h(); L.extDict = h();
+      ovrObjects.push({ handle: L.extDict, owner: L.handle, reactors: [L.handle], type: 'DICTIONARY', entries, hardOwner: 1, cloning: 1 },
+        ...recs.map((r) => ({ ...r, owner: L.extDict, reactors: [L.extDict] })));
+    }
+    for (const [name, lh] of ltH) usedLt.add(name), ltHandles.set(name, lh);
+  }
   const linetypes = [...usedLt].map((name) => {
     const own = doc.linetypes?.get(name), pattern = patternOf(doc, name) || [];
-    return { name, description: own?.description || name, patternLength: pattern.reduce((a, v) => a + Math.abs(v), 0), elements: pattern.map((length) => ({ length })) };
+    return { name, ...(ltHandles.has(name) ? { handle: ltHandles.get(name) } : {}), description: own?.description || name, patternLength: pattern.reduce((a, v) => a + Math.abs(v), 0), elements: pattern.map((length) => ({ length })) };
   });
   if (doc.meta.ltscale > 0 && doc.meta.ltscale !== 1) header.LTSCALE = doc.meta.ltscale;
   const dimstylesT = [{ name: 'Standard', vars: dsVars(doc.current.dim) }, ...[...dimStylesOut.values()].filter((d) => !/^standard$/i.test(d.name))];   // before the styles: DIMTXSTY adds its text style
   const model = {
     header,
-    tables: { layers, views, linetypes, appids: [{ name: 'CADCRAFT' }], dimstyles: dimstylesT, styles: [...textStyles.values()], ...(doc.vports ? { vports: activeVports(doc.vports, ext) } : {}) },
+    tables: { layers, views, linetypes, appids: [{ name: 'CADCRAFT' }], dimstyles: dimstylesT, styles: [...textStyles.values()], ...(doc.vports || doc.viewTwist ? { vports: activeVports(doc.vports, ext, doc.viewTwist) } : {}), ...(ucsTable.length ? { ucs: ucsTable } : {}) },
     blocks: [{ name: '*Model_Space', entities }, ...spaces, ...blocks],
     layouts,
   };
+  if (dynRecords.length) {   // the source's objects, classes and version: cc-dwg copies them bit for bit in that version, as proxies in others
+    model.tables.blockRecords = dynRecords; model.objects = ds.objects; model.classes = ds.classes;
+    model.version = ds.version; if (Number.isFinite(ds.maintenance)) model.maintenance = ds.maintenance;
+  }
+  if (picObjects.length || ovrObjects.length || clipObjects.length) model.objects = [...(model.objects || []), ...picObjects, ...ovrObjects, ...clipObjects];
   if (modelOnly) return { model, counts, m3 };
   const { bytes, report } = writeDwg(model, { version: code, created });
 
@@ -376,6 +492,10 @@ export function saveDwg(doc, { version = '2000', created = new Date(), modelOnly
   if (n('other')) notes.push(t('dwg.save.other', { n: n('other') }));
   if (n('material')) notes.push(t('dwg.save.material'));
   if (n('tr2000')) notes.push(t('dwg.save.tr2000'));
+  if (n('mask2000')) notes.push(t('dwg.save.mask2000', { n: n('mask2000') }));
+  if (n('clipDyn')) notes.push(t('dwg.save.clipdyn', { n: n('clipDyn') }));
+  if (n('dynDropped')) notes.push(t('dwg.save.dyn.dropped', { n: n('dynDropped') }));
+  if (dynRecords.length && ds.version && ds.version !== code) notes.push(t('dwg.save.dyn.version', { n: dynRecords.filter((r) => ds.blocks.get(r.name)?.def).length, v: t('dwg.version', { v: vkey }) }));
   // the writer's own notes, minus the true-colour one (said above, in CadCraft's words)
   const own = report.notes.filter((t) => !/true colour/.test(t));
   return { bytes, report: { ...report, version: vkey, notes: [...notes, ...own], counts: { ...report.counts, ...counts }, top } };
@@ -392,10 +512,10 @@ function openRing(pts) {
  * The split screen (doc.vports) → the VPORT table's *Active records for cc-dwg (dwg-vports.js): corners, view, aspect;
  * a pane showing a sheet keeps the sheet's name in CADCRAFT xdata "PANESHEET:<name>" (only CadCraft reads it).
  */
-export function activeVports(vports, ext) {
+export function activeVports(vports, ext, twist = 0) {
   const fb = validBounds(ext) ? { cx: (ext.minX + ext.maxX) / 2, cy: (ext.minY + ext.maxY) / 2, h: Math.max(ext.maxY - ext.minY, (ext.maxX - ext.minX) / 1.6, 1e-6) * 1.05 } : null;
-  return vportRecords(vports, fb).map((r) => ({
-    name: '*Active', lowerLeft: { x: r.x0, y: r.y0 }, upperRight: { x: r.x1, y: r.y1 }, aspect: r.aspect,
+  return vportRecords(vports, fb, twist).map((r) => ({
+    name: '*Active', lowerLeft: { x: r.x0, y: r.y0 }, upperRight: { x: r.x1, y: r.y1 }, aspect: r.aspect, ...(r.tw ? { twist: r.tw } : {}),   // a turned view (DR.8)
     ...(r.h > 0 ? { center: { x: r.cx, y: r.cy }, viewHeight: r.h } : {}),
     ...(r.sheet ? { xdata: { CADCRAFT: [[1000, 'PANESHEET:' + r.sheet.slice(0, 245)]] } } : {}),
   }));

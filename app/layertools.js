@@ -25,6 +25,7 @@ import { linetypeNames, ltLabel, lwLabel, LINEWEIGHTS } from './linetypes.js';
 import { countBlocks, countsCsv, attributesCsv } from './count.js';
 import { attachXref, detachXref, bindXref, xrefs, isXrefRoot } from './xref.js';
 import { installFlatView } from './flatview.js';
+import { clipPoly, clipEntities } from './xclip.js';
 
 /** The layer an object you picked counts as on (a block reference: its own layer, as AutoCAD without the nested option). */
 const layerOf = (doc, id) => doc.get(id)?.layer ?? null;
@@ -319,8 +320,32 @@ export function installLayerTools(def, opt) {
       c.print(t('xref.reloaded', { name, file: got.fileName, n: c.doc.blocks.get(name).entities.length }));
       if (r.note) c.print(r.note);
     } else if (o === 'B') {
-      c.doc.change('XREF', () => bindXref(c.doc, name));
-      c.print(t('xref.bound', { name }));
+      // WL.17: references clipped with XCLIP may keep only their clipped part
+      const clipped = [];
+      for (const m of [c.doc.model, ...c.doc.layouts.map((l) => l.entities)]) for (const e of m.values()) if (e.type === 'insert' && e.block === name && clipPoly(e)) clipped.push({ e, m });
+      let only = false;
+      if (clipped.length) {
+        const k = await c.keyword(t('xref.bind.which', { n: clipped.length }), { options: [opt('A', t('opt.all')), opt('C', t('opt.clipped'))], default: 'A' });
+        const v = k?.option ?? k;
+        if (!v) return;
+        only = v === 'C';
+      }
+      let cut = 0;
+      c.doc.change('XREF', () => {
+        bindXref(c.doc, name);
+        if (!only) return;
+        const root = c.doc.blocks.get(name);
+        for (const { e, m } of clipped) {
+          const r = clipEntities(c.doc, root.entities, clipPoly(e));
+          let n = 1;
+          while (c.doc.blocks.has(name + '$clip' + n)) n++;
+          c.doc.defineBlock({ name: name + '$clip' + n, base: { ...root.base }, entities: r.entities, ...(root.attdefs ? { attdefs: root.attdefs } : {}) });
+          const { clip, ...rest } = e;   // eslint-disable-line no-unused-vars
+          c.doc.update(e.id, { ...rest, block: name + '$clip' + n }, m);
+          cut += r.cut;
+        }
+      });
+      c.print(t(only ? 'xref.bound.clipped' : 'xref.bound', { name, n: clipped.length, cut }));
     } else {
       c.doc.change('XREF', () => detachXref(c.doc, name));
       c.print(t('xref.detached', { name }));

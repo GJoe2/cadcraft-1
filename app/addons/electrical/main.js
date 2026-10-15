@@ -10,7 +10,7 @@
  * the same undo step: api.drawing.afterChange), and shows its fields in the Properties panel (W2.11).
  *
  * Commands: ELSYMBOL ELWIRE ELNUMBER ELTAG ELUPDATE ELSHEET ELREPORT ELCHECK ELSTANDARD ELCABLE · ELINSTALL ELCIRCUIT
- * ELROUTE ELPANEL ELBALANCE. The modules in lib/ are DOM-free and tested in Node (test/test.mjs).
+ * ELROUTE ELPANEL ELBALANCE · ELSAVEBLOCK ELDESIGNBLOCK (design blocks, 0.5 WL.35) · ELIMPORTSYM (other symbol libraries, WL.36). The modules in lib/ are DOM-free and tested in Node (test/test.mjs).
  */
 
 import { setT, t } from './lib/text.js';
@@ -23,6 +23,8 @@ import { sheetList, terminalPlan, cableList, partsList, toCsv, addReportSheets }
 import { INSTALL, INSTALL_GROUPS, installSymbol, installBlock, installBlockName, installAttrs, installation, assignCircuit, defineCircuit, cableLengths, defaultScale } from './lib/install.js';
 import { panelSchedule, balancePhases, applyPhases, boardCircuits, PHASES } from './lib/panel.js';
 import { runChecks } from './lib/checks.js';
+import * as DB from './lib/designblocks.js';
+import * as SL from './lib/symlib.js';
 
 export const DEFAULTS = { toolbar: false, std: 'iec', wireFormat: '{sheet}.{path}.{seq}', wirePer: 'net', tagScheme: 'path', autoTag: true, live: true, wireLayer: 'EL-WIRE', planScale: '', ortho: true };
 const SNAP = 2;   // paper millimetres: clicks this close to a pin or a wire end land on it
@@ -49,14 +51,20 @@ export function activate(api) {
   cmd('ELSYMBOL', ['ELS'], async (c) => {
     const key = await pickSymbol(c);
     if (!key) return;
+    if (typeof key === 'object') { await placeSymbol(c, key.key, { blk: key.block, label: key.name }); return; }   // an imported one (WL.36)
     lastOf.symbol = key;
     await placeSymbol(c, key);
   });
 
   async function pickSymbol(c) {
     // a symbol's key typed here (ELSYMBOL coil) places it at once: hidden options match exactly before the groups' labels
-    const r = await c.keyword(t('ask.group'), { options: [...GROUPS.map((g, i) => opt(String(i + 1), t('group.' + g))), ...SYMBOLS.map((s) => ({ key: s.key, label: s.key, hidden: true }))], default: String(GROUPS.indexOf(symbol(lastOf.symbol)?.group) + 1 || 1) });
+    const lib = libSaved();
+    const r = await c.keyword(t('ask.group'), { options: [...GROUPS.map((g, i) => opt(String(i + 1), t('group.' + g))), ...(lib.length ? [opt('L', t('group.imported'))] : []), ...SYMBOLS.map((s) => ({ key: s.key, label: s.key, hidden: true }))], default: String(GROUPS.indexOf(symbol(lastOf.symbol)?.group) + 1 || 1) });
     const k = yes(r);
+    if (k === 'L') {
+      const r3 = await c.keyword(t('ask.imported', { list: lib.slice(0, 9).map((x, i) => (i + 1) + ' ' + x.name).join(', ') }), { options: lib.map((x, i) => ({ key: String(i + 1), label: String(i + 1), hidden: i >= 9 })), default: '1' });
+      return lib[Number(yes(r3)) - 1] || null;
+    }
     if (symbol(k)) return k;
     const g = GROUPS[Number(k) - 1];
     if (!g) return null;
@@ -65,20 +73,22 @@ export function activate(api) {
     return list[Number(yes(r2)) - 1]?.key || null;
   }
 
-  async function placeSymbol(c, key, { at = null } = {}) {
+  async function placeSymbol(c, key, { at = null, blk: given = null, label = null } = {}) {
     const doc = c.doc, std = settings.std;
-    const blk = symbolBlock(key, std);
+    const blk = given || symbolBlock(key, std);
+    const what = label || t('sym.' + key);
     let rot = 0;
     let p = at;
     while (!p) {
       c.preview((cur) => outline(blk, cur, rot));
-      const r = await c.point(t('ask.place', { what: t('sym.' + key) }), { options: [opt('R', t('opt.rotate'))] });
+      const r = await c.point(t('ask.place', { what }), { options: [opt('R', t('opt.rotate'))] });
       c.preview(null);
       if (r?.option === 'R') { rot = (rot + Math.PI / 2) % (Math.PI * 2); continue; }
       if (!r || r.option) return null;
       p = snapToGrid(doc, r);
     }
-    let attrs = symbolAttrs(key);
+    // an imported symbol starts with its own attributes' defaults (their maker, part … mapped onto ours)
+    let attrs = given ? Object.fromEntries((given.attdefs || []).filter((a) => !a.constant).map((a) => [a.tag, a.tag === 'TAG' ? '' : String(a.def ?? '')])) : symbolAttrs(key);
     const s = symbol(key);
     if (s.role === 'contact') {
       const coils = coilTags(doc);
@@ -100,7 +110,7 @@ export function activate(api) {
     });
     const now = doc.get(made.id);
     if (s.role === 'coil' && now?.attrs?.TAG) lastOf.coilTag = now.attrs.TAG;
-    c.print(t('done.symbol', { what: t('sym.' + key), tag: now?.attrs?.TAG || t('none') }));
+    c.print(t('done.symbol', { what, tag: now?.attrs?.TAG || t('none') }));
     return now;
   }
 
@@ -268,6 +278,143 @@ export function activate(api) {
     api.select(ids);
   }
 
+  // ---------------------------------------------------------------------------------------------- other symbol libraries (0.5 WL.36)
+  // A DWG/DXF block library → Electrical symbols, each acting as one of our types; kept in this browser ('symbolLibrary')
+  // and placed with ELSYMBOL › Imported.
+  const libSaved = () => SL.readLibrary(api.storage.get('symbolLibrary') || []);
+  cmd('ELIMPORTSYM', ['ELIS'], async (c) => {
+    const [file] = await pickFiles('.dwg,.dxf');
+    if (!file) return;
+    let lib;
+    try { lib = await readDrawing(file); } catch (err) { c.print(t('symlib.unreadable', { file: file.name, why: err?.message || String(err) })); return; }
+    const found = SL.candidates(lib);
+    if (!found.length) { c.print(t('symlib.none', { file: file.name })); return; }
+    const sugg = found.map((b) => SL.suggest(b.name));
+    const r = await c.keyword(t('ask.symlib.how', { n: found.length, m: sugg.filter(Boolean).length }), { options: [opt('A', t('opt.suggested')), opt('O', t('opt.one_by_one'))], default: 'A' });
+    const how = yes(r);
+    if (how !== 'A' && how !== 'O') return;
+    const per = SL.unitScale(lib.meta?.units);   // the file's own units, when it says
+    const u = yes(await c.keyword(t('ask.symlib.units'), { options: [opt('M', t('opt.mm')), opt('I', t('opt.inches'))], default: per === 25.4 || per === 304.8 ? 'I' : 'M' }));
+    if (u !== 'M' && u !== 'I') return;
+    const scale = u === 'I' ? 25.4 : per >= 10 && per !== 25.4 && per !== 304.8 ? per : 1;
+    const keys = SYMBOLS.map((s) => s.key);
+    const chosen = [];
+    for (let i = 0; i < found.length; i++) {
+      let key = sugg[i];
+      if (how === 'O') {
+        const a = await c.keyword(t('ask.symlib.type', { name: found[i].name, n: i + 1, of: found.length }), { options: [opt('S', t('opt.skip')), ...keys.map((k) => ({ key: k, label: k, hidden: true }))], default: key || 'S' });
+        const k = yes(a);
+        if (k === null || k === undefined) return;
+        key = keys.includes(k) ? k : null;
+      }
+      if (key) chosen.push({ ...found[i], key });
+    }
+    const saved = libSaved();
+    const made = [];
+    let noPins = 0;
+    for (const b of chosen) {
+      const cv = SL.convert(b.blk, b.key, { scale, name: b.name });
+      if (!cv.pins.length && !['earth'].includes(b.key)) noPins++;
+      const entry = { key: b.key, name: b.name.slice(0, 60), block: cv.block };
+      const j = saved.findIndex((x) => x.block.name === cv.block.name);
+      if (j >= 0) saved[j] = entry; else saved.push(entry);
+      made.push(entry);
+    }
+    api.storage.set('symbolLibrary', saved);
+    c.print(t('symlib.done', { n: made.length, skipped: found.length - made.length, file: file.name }) + (noPins ? ' ' + t('symlib.no_pins', { n: noPins }) : ''));
+  }, { noRepeat: true });
+
+  /** A DWG or DXF file → a Doc of its own (CadCraft's readers, loaded when first needed). */
+  async function readDrawing(file) {
+    const { Doc } = await import('../../doc.js');
+    const d = new Doc();
+    if (/\.dxf$/i.test(file.name)) { const { readDxf } = await import('../../dxf.js'); d.load(readDxf(await file.text())); }
+    else { const { readDwg } = await import('../../dwg/read.js'); const { importDwg } = await import('../../dwg-import.js'); d.load(importDwg(readDwg(new Uint8Array(await file.arrayBuffer())))); }
+    return d;
+  }
+
+  // ---------------------------------------------------------------------------------------------- design blocks (0.5 WL.35)
+  // Saved in this browser (api.storage 'designBlocks'), and as .elblock.json files to share (Export / Import).
+  const blocksSaved = () => (api.storage.get('designBlocks') || []).map((x) => DB.read(x)).filter(Boolean);
+  const blocksStore = (list) => api.storage.set('designBlocks', list);
+
+  cmd('ELSAVEBLOCK', ['ELSB'], async (c) => {
+    const sel = await c.select(t('ask.dblock.select'));
+    const ids = [...(sel || [])];
+    if (!ids.length) return;
+    const base = await c.point(t('ask.dblock.base'));
+    if (!base || base.option) return;
+    const name = String(await c.string(t('ask.dblock.name')) ?? '').trim().slice(0, DB.LIMITS.name);
+    if (!name) return;
+    const list = blocksSaved();
+    const i = list.findIndex((b) => b.name.toLowerCase() === name.toLowerCase());
+    if (i >= 0 && yes(await c.keyword(t('ask.dblock.replace', { name }), { options: [opt('Y', t('opt.yes')), opt('N', t('opt.no'))], default: 'N' })) !== 'Y') return;
+    const db = DB.capture(c.doc, ids, snapToGrid(c.doc, base), name);
+    if (!db.entities.length) { c.print(t('dblock.empty')); return; }
+    if (JSON.stringify(db).length > DB.LIMITS.json) { c.print(t('dblock.too_big')); return; }
+    if (i >= 0) list[i] = db; else list.push(db);
+    blocksStore(list);
+    const skipped = DB.leftOut(c.doc, ids);
+    c.print(t('dblock.saved', { name, n: db.entities.length }) + (skipped ? ' ' + t('dblock.left_out', { n: skipped }) : ''));
+  }, { keepSelection: true });
+
+  cmd('ELDESIGNBLOCK', ['ELDB'], async (c) => {
+    const list = blocksSaved();
+    const r = await c.keyword(list.length ? t('ask.dblock.pick', { list: list.slice(0, 9).map((b, i) => (i + 1) + ' ' + b.name).join(', ') }) : t('ask.dblock.pick.none'), {
+      options: [...list.map((b, i) => ({ key: String(i + 1), label: String(i + 1), hidden: i >= 9 })), opt('I', t('opt.import')), ...(list.length ? [opt('E', t('opt.export')), opt('D', t('opt.delete'))] : [])],
+      default: list.length ? '1' : 'I' });
+    const k = yes(r);
+    if (k === 'I') {
+      const files = await pickFiles('.json');
+      let added = 0, bad = 0;
+      const all = blocksSaved();
+      for (const f of files) {
+        const db = DB.read(await f.text());
+        if (!db) { bad++; continue; }
+        const j = all.findIndex((b) => b.name.toLowerCase() === db.name.toLowerCase());
+        if (j >= 0) all[j] = db; else all.push(db);
+        added++;
+      }
+      blocksStore(all);
+      c.print(t('dblock.imported', { n: added }) + (bad ? ' ' + t('dblock.import_bad', { n: bad }) : ''));
+      return;
+    }
+    if (!list.length) return;
+    if (k === 'E' || k === 'D') {
+      const which = yes(await c.keyword(t('ask.dblock.which'), { options: list.map((b, i) => ({ key: String(i + 1), label: String(i + 1) })), default: '1' }));
+      const b = list[Number(which) - 1];
+      if (!b) return;
+      if (k === 'E') { download(b.name.replace(/[\\/:*?"<>|]+/g, '-') + '.elblock.json', JSON.stringify(b, null, 1), 'application/json'); c.print(t('dblock.exported', { name: b.name })); }
+      else { blocksStore(list.filter((x) => x !== b)); c.print(t('dblock.deleted', { name: b.name })); }
+      return;
+    }
+    const db = list[Number(k) - 1];
+    if (!db) return;
+    const look = (at) => db.entities.flatMap((e) => (e.type === 'insert' ? outline(c.doc.blocks.get(e.block) || db.blocks.find((x) => x.name === e.block) || { entities: [] }, { x: at.x + e.x, y: at.y + e.y }, e.rot || 0, e.sx || 1)
+      : ['line', 'poly', 'circle', 'arc'].includes(e.type) ? [DB.moved(e, at.x, at.y)] : []));
+    c.preview((cur) => look(snapToGrid(c.doc, cur)));
+    const p = await c.point(t('ask.place', { what: db.name }));
+    c.preview(null);
+    if (!p || p.option) return;
+    const at = snapToGrid(c.doc, p);
+    let res;
+    c.doc.change('ELDESIGNBLOCK', () => {
+      res = DB.place(c.doc, db, at, { scheme: settings.tagScheme, format: settings.wireFormat, per: settings.wirePer });
+    });
+    c.print(t('dblock.placed', { name: db.name, tagged: res.tagged + res.terminals, numbered: res.numbered }));
+  });
+
+  function pickFiles(accept) {
+    if (typeof document === 'undefined') return Promise.resolve([]);
+    return new Promise((resolve) => {
+      const i = document.createElement('input');
+      i.type = 'file'; i.accept = accept; i.multiple = true;
+      i.addEventListener('change', () => resolve([...(i.files || [])]));
+      i.addEventListener('cancel', () => resolve([]));
+      i.click();
+    });
+  }
+
   cmd('ELSTANDARD', [], async (c) => {
     const r = await c.keyword(t('ask.standard', { std: t('std.' + settings.std) }), { options: [opt('I', t('std.iec')), opt('A', t('std.ansi')), opt('C', t('opt.convert'))], default: settings.std === 'iec' ? 'A' : 'I' });
     const k = yes(r);
@@ -279,7 +426,7 @@ export function activate(api) {
       for (const sp of spacesOf(doc)) for (const e of [...sp.map.values()]) {
         if (e.type !== 'insert') continue;
         const meta = readMeta(doc.blocks.get(e.block));
-        if (!meta || !symbol(meta.sym) || meta.std === settings.std) continue;
+        if (!meta || !symbol(meta.sym) || meta.std === settings.std || meta.std === 'lib') continue;   // imported symbols keep their own drawing (WL.36)
         const b = symbolBlock(meta.sym, settings.std);
         ensureBlock(doc, b);
         doc.update(e.id, { ...e, block: b.name }, sp.map);

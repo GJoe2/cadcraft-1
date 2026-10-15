@@ -191,6 +191,18 @@ export function installCadFns(L) {
   // ---- system variables ----
   const vname = (x) => (x instanceof Sym ? x.name : str(x));
   d('GETVAR', async (a, L) => { arity(a, 1); return toLisp(await call(L, 'getvar', vname(a[0]))); });
+  // (trans pt from to [disp]) through the host, which knows the UCS and the view's turn (0.5 DR.8); replaces the
+  // world-only one in builtins.js
+  d('TRANS', async (a, L) => {
+    arity(a, 3, 4);
+    const p = fromLisp(a[0]);
+    if (!Array.isArray(p) || p.length < 2 || !p.every((x) => typeof x === 'number')) throw bad('pointp', a[0]);
+    const sys = (x) => (x instanceof Int ? x.v : isNum(x) ? numVal(x) : x instanceof Ename ? 0 : Array.isArray(fromLisp(x)) ? 0 : -1);
+    const f = sys(a[1]), t2 = sys(a[2]);
+    if (f < 0 || f > 3) throw bad('fixnump', a[1]);
+    if (t2 < 0 || t2 > 3) throw bad('fixnump', a[2]);
+    return toLisp(await call(L, 'trans', p, f === 3 ? 0 : f, t2 === 3 ? 0 : t2, truthy(a[3])));
+  });
   d('SETVAR', async (a, L) => {
     arity(a, 2);
     const name = vname(a[0]);

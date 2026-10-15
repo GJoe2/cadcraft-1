@@ -3,7 +3,7 @@ title: Not built yet
 summary: What this build of the CadCraft drafting app does not do yet, and what to do instead today.
 section: trouble
 order: 20
-keywords: missing, limitations, properties, ucs, annotative, dynamic block, spline, roadmap, not supported, dwg save, hatch, stretch, array, join, matchprop, break, lengthen, linetype, lineweight, xref, cloud, desktop, 3d, solids, booleans, multileader, wipeout
+keywords: missing, limitations, properties, ucs, annotative, dynamic block, spline, roadmap, not supported, dwg save, hatch, stretch, array, join, matchprop, break, lengthen, linetype, lineweight, xref, cloud, 3d, solids, booleans, multileader, wipeout
 ---
 
 CadCraft is in development. This page lists what the current build does not do, so you do not hunt for it. Each item says what to do instead today.
@@ -14,16 +14,14 @@ CadCraft is in development. This page lists what the current build does not do, 
 |---|---|
 | A CadCraft DWG checked in AutoCAD itself | Every saved version is read back by three other programs' DWG readers and by CadCraft. See [What a DWG keeps and changes](topic:files#what-a-dwg-keeps-and-changes). |
 | Saving DXF newer than 2000 | Save as DXF 2000, or as DWG up to AutoCAD 2018. |
-| Saving over the opened file | Every save downloads a new copy. Replace the old file yourself if you want to. |
+| Saving over the opened file in the browser | Every save downloads a new copy; replace the old file yourself if you want to. In CadCraft Studio, {{key:Mod+S}} writes back to the file you opened. |
 | Cloud saving and sync between computers | Not available yet. Keep your DWG and DXF files in your own folders. |
-| A desktop version | Not available yet. CadCraft runs in the browser. |
-| Keeping a loaded linked drawing as a link when saving; overlays; clipping a link; editing a link in place | Saving binds a loaded link into the file (it stays a link in CadCraft until then). Reload after changing the other drawing. |
-| Pictures (images) in opened files, and wipeouts that hide what is under them | A picture shows as a frame with its file name; a wipeout as its frame. |
+| Overlays, and editing a linked drawing in place | Attach the drawing as a link and reload it after changing the other drawing. A link stays a link when you save as DWG, and {{cmd:XCLIP}} clips it. |
+| Pictures in DXF; wipeouts that hide what is under them | DXF keeps a picture as its frame with the file name; DWG keeps it as a picture — see [Pictures in a drawing](topic:pictures). A wipeout shows as its frame. |
 | Editing multileaders that have a block, several leader lines or curved lines | They are drawn as the other program drew them and move as one. Text multileaders come in editable. |
 | Tables in a DXF | Counted in "About this file", not shown. Tables in a DWG are shown as the other program drew them. |
 | Binary DXF | Save it as text (ASCII) DXF in the program that made it. |
 | Copy and paste with other programs | CadCraft's clipboard works between CadCraft drawings and tabs in the same browser, not with other programs. Save as DWG or DXF and open it there. See [Copy, paste and duplicate](topic:copy-paste). |
-| More than one drawing open at a time | Open the other drawing in a second browser tab. |
 
 ## Drawing and editing
 
@@ -42,7 +40,7 @@ CadCraft is in development. This page lists what the current build does not do, 
 | Paragraph text edited at its rotation | The editor opens level; the text keeps its rotation. |
 | Multileaders saved as multileader objects in a DXF; several leader lines on one multileader; block content | A DWG keeps them as multileaders; an R12 DXF keeps what they draw (lines, arrowhead and text). |
 | Tables | Lines and text. |
-| Attribute definitions kept on their own in a saved file (outside a block), multiple-line attributes, dynamic blocks (parameters and actions) | Put attribute definitions into a block before saving: on their own they save as text showing the tag. |
+| Attribute definitions kept on their own in a saved file (outside a block), multiple-line attributes | Put attribute definitions into a block before saving: on their own they save as text showing the tag. |
 | Layer states (saving and restoring which layers are on) | Use {{cmd:LAYISO}} / {{cmd:LAYUNISO}}, or turn layers on and off by hand. |
 | Window polygon and crossing polygon selection, and saved selection filters | Fence (`F`), Window, Crossing, Remove (`R`), {{cmd:QSELECT}} for a rule. |
 
@@ -55,9 +53,9 @@ CadCraft is in development. This page lists what the current build does not do, 
 | Materials that other programs see | A saved file keeps the material name for CadCraft; other programs show the layer's material. |
 | Transparency in DWG 2000 and DXF files | Other programs show those objects solid; CadCraft keeps the transparency. Save as DWG 2004 or later for everyone. |
 | An associative hatch in other programs | The hatch is saved; CadCraft keeps the setting, other programs see a hatch that does not follow its boundary. |
-| A user coordinate system (UCS) | Coordinates in Properties are world coordinates. |
+| Coordinates in Properties in the UCS | Properties shows world coordinates; the status bar and {{cmd:ID}} show UCS ones. See [Turn the view and use your own coordinates](topic:ucs-and-turned-view). |
 | Annotative scaling | The annotative setting is kept with text; the annotation scale is always 1:1. |
-| Dynamic block parameters | A dynamic block shows as the shape it was saved in. |
+| Changing a dynamic block's distances, angles or flips; dynamic blocks kept dynamic when you save in another DWG version or as DXF | Switch its visibility state in Properties › {{ui:Custom}}; its other values show there read only. It stays dynamic when you save it as DWG in the version the drawing came in. See [Dynamic blocks](topic:dynamic-blocks). |
 | Splines with fit and control points | An opened spline becomes a polyline; edit its vertices in Properties. |
 | A hatch that follows its boundary (associative) | The associative setting is kept and saved; hatch again after changing the outline. |
 ## Precision aids
@@ -70,14 +68,11 @@ CadCraft is in development. This page lists what the current build does not do, 
 | Dynamic input for grips, and its options list (the down arrow) | The command line shows the options. |
 | Angles in degrees-minutes-seconds, grads or surveyor's bearings | Type decimal degrees: `30.5` for 30°30'. |
 | A view manager dialog; named views of a sheet that come back on that sheet | {{cmd:NAMEDVIEW}} lists and restores views. A saved file keeps them, but a sheet's views come back on the first sheet. |
-| Touch gestures (pinch zoom, two-finger pan) | {{ui:Extents}} and {{ui:Window}}. |
 
 ## Sheets, dimensions and plotting
 
 | Not built yet | Instead, today |
 |---|---|
-| Editing the model through a viewport | Edit on the {{ui:Model}} tab; aim viewports with {{cmd:VPVIEW}} or Properties. |
-| Twisted (rotated) viewports | Shown square to the sheet. |
 | A title block that updates itself | Edit its texts by hand; the SCALE field does not follow viewport changes. |
 | Named dimension styles | Settings for new dimensions plus each dimension's own sizes. See [Set dimension sizes](topic:dimension-settings). |
 | Ordinate dimensions, and editable two-line angular dimensions from opened files | They are shown as drawn in the file. |
@@ -108,6 +103,8 @@ CadCraft is in development. This page lists what the current build does not do, 
 | Copy and paste of solids | On the 3D tab, use {{cmd:COPY}}. The clipboard holds 2D objects only. |
 | Sections, views that follow later changes to the solids, and shaded solids on plotted sheets | {{cmd:VIEWBASE}} places flat views (a snapshot); run it again after changing the solids. |
 | Materials, textures and lighting settings | The visual styles: shaded, edges, hidden line, wireframe, X-ray. |
+| Map layers saved in the DWG or DXF, or plotted; map layers on sheets' viewports and the 3D tab | Map layers show under the model space on screen: see [Map layers under the drawing](topic:map-layers) |
+| E57 point clouds, a point cloud saved with the drawing or plotted, snapping to a cloud on the 3D tab, upright (section) slices on the Model tab | Attach LAS, LAZ, XYZ or PTS each time you open the drawing; trace from a plan slice on the Model tab: see [Trace as-built lines over a point cloud](topic:point-clouds) |
 
 ## Routines and customizing
 

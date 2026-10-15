@@ -30,7 +30,9 @@
  */
 
 import { add, sub, mul, dot, cross, len, norm, ident, mmul, apply, applyDir, det3, translation, rotation, invert, frame, to2 } from './vec.js';
-import { faceTris, faceNormal, edgeFaces, solidInfo, meshDef, edgesDef, smoothNormals } from './model.js';
+import { faceTris, faceNormal, edgeFaces, solidInfo, meshDef, edgesDef, smoothNormals, paintHex, isMaterialPaint, isImagePaint, imagePaintFit, toBase64 } from './model.js';
+/** Paint as exports group it: an imported texture (one placement per face) exports as its colour, so faces share a material. */
+const xp = (c) => (isImagePaint(c) ? paintHex(c) : c);
 import { parseXML, child, kids, walkXML } from './xml.js';
 import { textStrokes, cleanDxfText, cleanMtext } from './strokefont.js';
 import { t } from "./i18n.js";
@@ -48,7 +50,7 @@ const isIdent = (m) => m.every((v, i) => Math.abs(v - (i % 5 === 0 ? 1 : 0)) < 1
 const srgbToLin = (c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
 const linToSrgb = (c) => (c <= 0.0031308 ? c * 12.92 : 1.055 * c ** (1 / 2.4) - 0.055);
 function hexToLinear(hex) {
-  const n = parseInt(hex.slice(1), 16);
+  const n = parseInt(paintHex(hex).slice(1), 16);   // a library material exports as its colour (0.5 RC.7)
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((v) => srgbToLin(v / 255));
 }
 function linearToHex(rgb) {
@@ -63,7 +65,7 @@ function defTris(def, dflt = null) {
     const n = faceNormal(def, f);
     if (!len(n)) continue;
     for (const t of faceTris(def, f)) {
-      const tri = { p: t.map((v) => def.verts.get(v)), n, color: f.color || dflt || null };
+      const tri = { p: t.map((v) => def.verts.get(v)), n, color: xp(f.color || dflt) || null };
       if (smooth.size && t.some((v) => smooth.has(fid + '|' + v))) tri.ns = t.map((v) => smooth.get(fid + '|' + v) || n);
       out.push(tri);
     }
@@ -109,7 +111,7 @@ export function exportGLB(model) {
       // the default material leaves baseColorFactor out (white): a face without a colour stays without one on re-import
       const pbr = { metallicFactor: 0, roughnessFactor: 0.9 };
       if (color) pbr.baseColorFactor = [...hexToLinear(color), 1];
-      gltf.materials.push({ name: color ? 'Colour ' + color : 'Default', pbrMetallicRoughness: pbr, doubleSided: true });
+      gltf.materials.push({ name: color ? (isMaterialPaint(color) ? 'Material ' + color.slice(4) : 'Colour ' + color) : 'Default', pbrMetallicRoughness: pbr, doubleSided: true });
       matIndex.set(k, gltf.materials.length - 1);
     }
     return matIndex.get(k);
@@ -235,7 +237,7 @@ export function exportOBJ(model, { mtl = null } = {}) {
         if (mirror) loop = loop.slice().reverse();
         const ids = loop.map(V);
         const ns = loop.map((v) => { const q = smooth.get(fid + '|' + v); return q ? N(zupToYup(norm(applyDir(wm, q)))) : flat(); });
-        faces.push({ ids, ns, mat: mtl ? matName(f.color || pc) : null });
+        faces.push({ ids, ns, mat: mtl ? matName(xp(f.color || pc)) : null });
       }
     }
     for (const e of loose) { V(e.a); V(e.b); }
@@ -251,14 +253,15 @@ export function exportOBJ(model, { mtl = null } = {}) {
   });
   return lines.join('\n') + '\n';
 }
-const matName = (c) => (c ? 'Colour_' + c.slice(1).toLowerCase() : 'Default');
+const matName = (c) => (!c ? 'Default' : isMaterialPaint(c) ? 'Material_' + c.slice(4) : 'Colour_' + c.slice(1).toLowerCase());
 /** The materials file for exportOBJ(model, {mtl}): one material per colour used (Kd in sRGB, as .mtl readers take it). */
 export function exportMTL(model) {
   const used = new Set();
-  model.walk((d, wm, path, pc) => { for (const f of d.faces.values()) used.add(f.color || pc || ''); });
+  model.walk((d, wm, path, pc) => { for (const f of d.faces.values()) used.add(xp(f.color || pc) || ''); });
   const out = ['# ModelCraft materials'];
   for (const c of [...used].sort()) {
-    const rgb = c ? [1, 3, 5].map((o) => (parseInt(c.slice(o, o + 2), 16) / 255).toFixed(6)) : ['0.800000', '0.800000', '0.800000'];
+    const h = c ? paintHex(c) : null;
+    const rgb = h ? [1, 3, 5].map((o) => (parseInt(h.slice(o, o + 2), 16) / 255).toFixed(6)) : ['0.800000', '0.800000', '0.800000'];
     out.push('', 'newmtl ' + matName(c || null), 'Kd ' + rgb.join(' '), 'Ka 0 0 0', 'Ks 0 0 0', 'd 1', 'illum 1');
   }
   return out.join('\n') + '\n';
@@ -399,6 +402,29 @@ export function importGLTF(model, bytes, name = 'glTF import') {
     const f = mats[mi]?.pbrMetallicRoughness?.baseColorFactor;
     return Array.isArray(f) && f.length >= 3 && f.slice(0, 3).every((x) => typeof x === 'number' && Number.isFinite(x)) ? linearToHex(f) : null;
   };
+  // base colour textures (0.5 RC.11 (b)): an embedded PNG / JPEG / WebP image kept in model.images, its UVs fitted per
+  // triangle into the face's paint (glTF's v runs down the image: flipped to SketchUp's up)
+  const texCache = new Map();
+  const sniff = (b) => (b[0] === 0x89 && b[1] === 0x50 ? 'image/png' : b[0] === 0xff && b[1] === 0xd8 ? 'image/jpeg' : b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 ? 'image/webp' : null);
+  const texOf = (mi) => {
+    if (texCache.has(mi)) return texCache.get(mi);
+    let out = null;
+    const bct = mats[mi]?.pbrMetallicRoughness?.baseColorTexture;
+    const img = bct && Number.isInteger(bct.index) ? arr(json.images)[arr(json.textures)[bct.index]?.source] : null;
+    if (img && typeof img === 'object' && model.addImage) {
+      let bytes = null;
+      if (Number.isInteger(img.bufferView)) {
+        const v = views[img.bufferView], buf = v && buffers[v.buffer];
+        if (buf && Number.isInteger(v.byteLength) && (v.byteOffset || 0) + v.byteLength <= buf.length) bytes = buf.subarray(v.byteOffset || 0, (v.byteOffset || 0) + v.byteLength);
+      } else if (typeof img.uri === 'string') { const m = img.uri.match(/^data:image\/[a-z]+;base64,(.*)$/s); if (m) bytes = base64(m[1]); }
+      const mime = bytes && bytes.length > 12 ? sniff(bytes) : null;
+      if (mime) {
+        try { out = { id: model.addImage({ name: String(img.name || mats[mi]?.name || 'texture').slice(0, 120), mime, data: toBase64(bytes), avg: colorOf(mi) }), tc: Number.isInteger(bct.texCoord) ? bct.texCoord : 0, avg: colorOf(mi) }; } catch { out = null; }
+      } else skip(t('m3d.io.textures_faces_keep_no_colour'));
+    }
+    texCache.set(mi, out);
+    return out;
+  };
   const tris = [];   // {p:[3], color}
   const meshes = arr(json.meshes), nodes = arr(json.nodes);
   const meshAt = (mi, m) => {
@@ -420,10 +446,17 @@ export function importGLTF(model, bytes, name = 'glTF import') {
       else if (mode === 5) for (let i = 0; i + 2 < idx.length; i++) list.push(i % 2 ? [idx[i + 1], idx[i], idx[i + 2]] : [idx[i], idx[i + 1], idx[i + 2]]);
       else for (let i = 1; i + 1 < idx.length; i++) list.push([idx[0], idx[i], idx[i + 1]]);
       const color = pr.material !== undefined ? colorOf(pr.material) : null;
+      const tex = pr.material !== undefined ? texOf(pr.material) : null;
+      const UV = tex && pr.attributes['TEXCOORD_' + tex.tc] !== undefined ? readAcc(pr.attributes['TEXCOORD_' + tex.tc]) : null;
       const pt = (i) => yupToZup(apply(m, [P.data[i * 3], P.data[i * 3 + 1], P.data[i * 3 + 2]]));
       for (const t of list) {
         const ps = t.map(pt);
-        tris.push({ p: mirror ? [ps[0], ps[2], ps[1]] : ps, color });
+        let c = color;
+        if (UV && UV.nc === 2 && t.every((i) => i < UV.count)) {
+          const uvs = t.map((i) => [UV.data[i * 2], 1 - UV.data[i * 2 + 1]]);
+          c = imagePaintFit(tex.id, ps, uvs, cross(sub(ps[1], ps[0]), sub(ps[2], ps[0])), tex.avg) || color;
+        }
+        tris.push({ p: mirror ? [ps[0], ps[2], ps[1]] : ps, color: c });
       }
     }
   };
@@ -1118,7 +1151,7 @@ const ACI = (() => {
   return t;
 })();
 export function nearestAci(hex) {
-  const m = /^#?([0-9a-f]{6})$/i.exec(String(hex || ''));
+  const m = /^#?([0-9a-f]{6})$/i.exec(String(paintHex(hex) || ''));
   if (!m) return 7;
   const r = parseInt(m[1].slice(0, 2), 16), g = parseInt(m[1].slice(2, 4), 16), b = parseInt(m[1].slice(4, 6), 16);
   let best = 7, bd = Infinity;
@@ -1168,7 +1201,7 @@ function cadScene(model) {
         if (mirror) t = [t[0], t[2], t[1]];
         const vis = (a, b) => real.has(ekey(a, b)) && !soft.has(ekey(a, b));
         const inv = (vis(t[0], t[1]) ? 0 : 1) | (vis(t[1], t[2]) ? 0 : 2) | 4 | (vis(t[2], t[0]) ? 0 : 8);
-        out.push({ t: 'face', pts: [P(t[0]), P(t[1]), P(t[2]), P(t[2])], inv, color: f.color || pc || null });
+        out.push({ t: 'face', pts: [P(t[0]), P(t[1]), P(t[2]), P(t[2])], inv, color: xp(f.color || pc) || null });
         report.triangles++;
       }
     }
@@ -1234,7 +1267,7 @@ export function exportDXF(model) {
 /** The model as a cc-dwg model (docs/DWG-LIB-SPEC.md) for writeDwg. */
 export function toDwgModel(model, { created } = {}) {
   const sc = cadScene(model);
-  const color = (hex) => { const m = /^#?([0-9a-f]{6})$/i.exec(String(hex || '')); return m ? { rgb: parseInt(m[1], 16), index: nearestAci(hex) } : { index: 256 }; };
+  const color = (hex) => { const m = /^#?([0-9a-f]{6})$/i.exec(String(paintHex(hex) || '')); return m ? { rgb: parseInt(m[1], 16), index: nearestAci(hex) } : { index: 256 }; };
   const P = (p) => ({ x: p[0], y: p[1], z: p[2] });
   const conv = (e) => (e.t === 'face' ? { type: '3DFACE', layer: '0', color: color(e.color), points: e.pts.map(P), invisibleEdges: e.inv }
     : e.t === 'line' ? { type: 'LINE', layer: '0', color: { index: 256 }, start: P(e.a), end: P(e.b) }
@@ -1299,7 +1332,7 @@ export function exportDAE(model, { name = 'ModelCraft model', date = new Date() 
   const iso = date.toISOString().replace(/\.\d+Z$/, 'Z');
   // materials: one per colour (faces' own, and placement colours filling faces that have none — M8), in the order met
   const colorIdx = new Map();
-  model.walk((d, wm, path, pc) => { for (const f of d.faces.values()) { const c = f.color || pc; if (c && !colorIdx.has(c)) colorIdx.set(c, colorIdx.size); } });
+  model.walk((d, wm, path, pc) => { for (const f of d.faces.values()) { const c = xp(f.color || pc); if (c && !colorIdx.has(c)) colorIdx.set(c, colorIdx.size); } });
   const geoms = [];
   const geomInfo = new Map();   // def id | placement colour → {id, mats: [material index]} | null
   /** the geometry of definition d with uncoloured faces in colour dflt (one per pair, made when first placed) */
@@ -1316,7 +1349,7 @@ export function exportDAE(model, { name = 'ModelCraft model', date = new Date() 
       if (!len(n)) continue;
       const ni = nrm.length / 3;
       nrm.push(...n);
-      const k = f.color || dflt || '';
+      const k = xp(f.color || dflt) || '';
       if (!sets.has(k)) sets.set(k, { vcount: [], p: [] });
       const set = sets.get(k);
       const polys = f.loops.length === 1 && convexFace(d, f, n) ? [f.loops[0]] : faceTris(d, f);
@@ -1380,10 +1413,10 @@ export function exportDAE(model, { name = 'ModelCraft model', date = new Date() 
     `<asset><contributor><authoring_tool>ModelCraft</authoring_tool></contributor><created>${iso}</created><modified>${iso}</modified><unit name="meter" meter="1"/><up_axis>Z_UP</up_axis></asset>`];
   if (colors.length) {
     out.push('<library_effects>' + colors.map((c, i) => {
-      const rgb = [1, 3, 5].map((o) => fx(parseInt(c.slice(o, o + 2), 16) / 255)).join(' ');
+      const h = paintHex(c), rgb = [1, 3, 5].map((o) => fx(parseInt(h.slice(o, o + 2), 16) / 255)).join(' ');
       return `<effect id="eff-${i}"><profile_COMMON><technique sid="common"><lambert><diffuse><color sid="diffuse">${rgb} 1</color></diffuse></lambert></technique></profile_COMMON></effect>`;
     }).join('') + '</library_effects>');
-    out.push('<library_materials>' + colors.map((c, i) => `<material id="mat-${i}" name="Colour_${c.slice(1)}"><instance_effect url="#eff-${i}"/></material>`).join('') + '</library_materials>');
+    out.push('<library_materials>' + colors.map((c, i) => `<material id="mat-${i}" name="${isMaterialPaint(c) ? 'Material_' + c.slice(4) : 'Colour_' + c.slice(1)}"><instance_effect url="#eff-${i}"/></material>`).join('') + '</library_materials>');
   }
   if (geoms.length) out.push('<library_geometries>' + geoms.join('\n') + '</library_geometries>');
   if (libNodes.length) out.push('<library_nodes>' + libNodes.join('\n') + '</library_nodes>');

@@ -18,7 +18,7 @@
  * library fields, invisible and preset: CC-ITEM-UUID, CC-ITEM-VER, CC-ITEM-NAME, CC-LIBRARY, CC-SHA256,
  * CC-LICENSE, CC-ATTRIB, CC-LICENSE-URL, CC-MAKER, CC-MODEL, CC-CATEGORY, CC-KIND, CC-SOURCE-FILE, and
  * each canonical param that has a value (CC-WIDTH-MM, CC-DEPTH-MM, CC-HEIGHT-MM, CC-WEIGHT-KG,
- * CC-ELEC-<KEY>, CC-PLUMB-<KEY>, CC-REMARKS).
+ * CC-ELEC-<KEY>, CC-PLUMB-<KEY>, CC-REMARKS), and a standard part's CC-PART-* fields from its source_attrs (PART_ATTR_TAGS).
  */
 
 import { TAU, normAngle, rad, emptyBounds, growPt, validBounds, entityBounds } from './geom.js';
@@ -123,6 +123,17 @@ function paramAttrs(params) {
   return out;
 }
 
+/** A standard part's or steel section's own fields (source_attrs CC-PART-TYPE/STD/SIZE/LENGTH/MATERIAL; 0.5 MQ.3/MQ.4,
+ * stdlib.js): kept as attributes so the parts list (PARTSLIST) reads them, also after DXF/DWG. Other source attributes
+ * stay out of the block, as before. */
+export const PART_ATTR_TAGS = ['CC-PART-TYPE', 'CC-PART-STD', 'CC-PART-SIZE', 'CC-PART-LENGTH', 'CC-PART-MATERIAL'];
+function partAttrs(src) {
+  if (!src || typeof src !== 'object' || Array.isArray(src)) return [];
+  const out = [];
+  for (const tag of PART_ATTR_TAGS) if (Object.prototype.hasOwnProperty.call(src, tag) && typeof src[tag] === 'string') out.push([tag, str(src[tag], 255)]);
+  return out;
+}
+
 /** The attribution line: the item's own, else built from its parts (title, author, license). */
 export function attributionOf(item) {
   const a = str(item.license?.attribution, 500);
@@ -163,6 +174,7 @@ export function blockFromItem(doc, item, { slug = null, library = 'librarycraft'
     [LIB_TAGS.maker, str(item.maker, 200)], [LIB_TAGS.model, str(item.model, 200)], [LIB_TAGS.category, str(item.category, 120)],
     [LIB_TAGS.kind, str(item.kind, 40)], [LIB_TAGS.source, str(pv.source_file, 255)],
     ...paramAttrs(item.params),
+    ...partAttrs(item.source_attrs),
   ];
   const attdefs = [
     attdef({ x: cx, y: cy, h, ha: 'center', va: 'middle', layer: '0' }, { tag: LIB_TAGS.item, prompt: t('lib.place.item_number'), def: '' }),

@@ -13,13 +13,16 @@
  *   d.apply(cur, base, parseLen, typed) → the pointer with the locks (and the value being typed) applied
  *   d.live(cur, base) → [value 0, value 1] for the fields (numbers; locked fields give their text)
  *   d.commit(typed, cur, base, { last, parseLen }) → the text to send for Enter, or null (send the typed text as it is)
+ *   d.ucs = { x, y, ang } | null   the UCS in force (0.5 DR.8): the fields show and take UCS values; points stay world
  */
+
+import { toUcs, toWorld } from './ucs.js';
 
 const num = (v) => String(Number(v.toFixed(10)));
 const ANGLE = /^[-+]?(?:\d+\.?\d*|\.\d+)$/;
 
 export class DynInput {
-  constructor() { this.reset(null); }
+  constructor() { this.ucs = null; this.reset(null); }
 
   reset(mode) { this.mode = mode; this.locked = [null, null]; this.active = 0; }
 
@@ -41,6 +44,11 @@ export class DynInput {
 
   apply(cur, base, parseLen, typed = '') {
     if (!this.mode || !cur) return cur;
+    if (this.ucs) {   // work in the UCS, hand back a world point
+      const u = this.ucs;
+      this.ucs = null;
+      try { const r = this.apply(toUcs(u, cur), base && toUcs(u, base), parseLen, typed); return r === null || r === undefined ? r : toWorld(u, r); } finally { this.ucs = u; }
+    }
     const s = String(typed ?? '').trim();
     if (s && this.locked[this.active] === null) {   // what is being typed counts as if it were locked
       const ok = this.mode === 'polar' && this.active === 1 ? ANGLE.test(s) : Number.isFinite(parseLen(s));
@@ -58,6 +66,7 @@ export class DynInput {
 
   live(cur, base) {
     if (!this.mode || !cur) return [null, null];
+    if (this.ucs) { cur = toUcs(this.ucs, cur); base = base && toUcs(this.ucs, base); }
     if (this.mode === 'xy') return [this.locked[0] ?? cur.x, this.locked[1] ?? cur.y];
     if (!base) return [null, null];
     let a = Math.atan2(cur.y - base.y, cur.x - base.x) * 180 / Math.PI;
@@ -69,13 +78,14 @@ export class DynInput {
     if (!this.mode) return null;
     const s = String(typed ?? '').trim();
     if (!this.any && this.active === 0) return null;   // nothing locked: the command line reads it as always (direct distance…)
+    // UCS values, as the command line reads #x,y and @d<a (DR.8)
     const vals = this.live(cur, base).map((v, i) => (i === this.active && s ? s : typeof v === 'number' ? num(v) : v));
     if (vals.some((v) => v === null || v === undefined)) return null;
     if (this.mode === 'xy') return vals[0] + ',' + vals[1];
     // @ counts from the last point given; when the base is another point, send where it lands instead
     if (last && Math.abs(last.x - base.x) < 1e-12 && Math.abs(last.y - base.y) < 1e-12) return '@' + vals[0] + '<' + vals[1];
-    const d = parseLen(vals[0]), a = +vals[1] * Math.PI / 180;
+    const d = parseLen(vals[0]), a = +vals[1] * Math.PI / 180, b = toUcs(this.ucs, base);
     if (!Number.isFinite(d) || !Number.isFinite(a)) return null;
-    return '#' + num(base.x + Math.cos(a) * d) + ',' + num(base.y + Math.sin(a) * d);
+    return '#' + num(b.x + Math.cos(a) * d) + ',' + num(b.y + Math.sin(a) * d);
   }
 }

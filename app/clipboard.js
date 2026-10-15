@@ -46,7 +46,7 @@ export const CLIP_LIMITS = Object.freeze({
   depth: 6,             // nesting inside an entity
 });
 
-const TYPES = new Set(['line', 'circle', 'arc', 'poly', 'ellipse', 'text', 'point', 'insert', 'hatch', 'dim', 'mleader']);
+const TYPES = new Set(['line', 'circle', 'arc', 'poly', 'ellipse', 'text', 'point', 'insert', 'hatch', 'dim', 'mleader', 'xline', 'ray']);
 const KEY_RE = /^[A-Za-z][A-Za-z0-9_]{0,31}$/;
 const BAD_KEYS = new Set(['constructor', 'prototype', 'toString', 'valueOf', 'hasOwnProperty']);
 const NAME_RE = /^[^<>/\\":;?*|=`\u0000-\u001f]{1,255}$/;   // a block name, after an anonymous block's leading "*"
@@ -61,6 +61,7 @@ function refsOf(list) {
 function plain(e) {
   const c = JSON.parse(JSON.stringify(e));
   delete c.id;
+  delete c.field;   // a view label's link names a viewport by id (WL.11): a copy is plain text
   for (const k of Object.keys(c)) if (k.startsWith('_')) delete c[k];
   return c;
 }
@@ -195,6 +196,13 @@ function checker() {
       case 'circle': need('cx', 'cy', 'r'); if (!(out.r > 0)) fail(t('clip.circle_has_no_radius')); break;
       case 'arc': need('cx', 'cy', 'r', 'a0', 'a1'); if (!(out.r > 0)) fail(t('clip.arc_has_no_radius')); break;
       case 'point': need('x', 'y'); break;
+      case 'xline': case 'ray': {   // construction lines (0.5 DR.6): a point and a direction, made a unit one here
+        need('x', 'y', 'dx', 'dy');
+        const L = Math.hypot(out.dx, out.dy);
+        if (!(L > 1e-12)) fail(t('clip.bad.direction', { what }));
+        out.dx /= L; out.dy /= L;
+        break;
+      }
       case 'ellipse': need('cx', 'cy', 'mx', 'my', 'ratio', 't0', 't1'); break;
       case 'text':
         need('x', 'y', 'h');

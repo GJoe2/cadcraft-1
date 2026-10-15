@@ -2,7 +2,9 @@
 /**
  * libpanel.js — the library panel (docs/LIBRARY-SPEC.md §3.2–3.4), a dialog in the page.
  * Sources: LibraryCraft (same-origin /api/v1/library), Files… (an item.json, or a DWG/DXF/IFC/glTF/
- * OBJ/RFA/CSV through libitem.js's adapters when this build has them) and Other feeds (base URLs kept
+ * OBJ/RFA/CSV through libitem.js's adapters when this build has them), Standard (steel sections and mechanical
+ * standard parts made in the page from the shared tables: stdlib.js; a section places as a section view, an elevation
+ * or a 3D member — STEELMEMBER — and the Parts list view lists every placed part) and Other feeds (base URLs kept
  * in localStorage). A card shows the preview, name, maker/model, license badge, version and a
  * "Withdrawn" warning; Place hands the item to INSERT (option L), which makes the LIB_ block and asks
  * where it goes. Also: Check for updates (§6.3; Update redefines the block), Library credits (copy,
@@ -20,6 +22,8 @@ import { LibraryClient, LIBRARYCRAFT, feedUrl, isUuid } from './library.js';
 import { itemProblem, itemEntities, libraryUses, updateLibraryBlock, creditsText, creditsCsv } from './libplace.js';
 import { prims, entityBounds, validBounds, emptyBounds, growPt } from './geom.js';
 import * as Li from './libitem.js';
+import { FAMILIES as STD_FAMILIES, familyOf, standardCards, cardDefaults, cardItem, partsList, partsCsv, installStandard } from './stdlib.js';
+import { commandRegistry } from './commands.js';
 
 import { t } from './i18n.js';
 /** 'foodservice/sinks' → 'Foodservice: Sinks', as the website shows it; unknown keys as they are. */
@@ -35,7 +39,11 @@ const LICENSES = { 'CC0-1.0': 'CC0', 'CC-BY-4.0': 'CC BY', 'CC-BY-SA-4.0': 'CC B
 const LICENSE_KEYS = { 'MAKER-TERMS': 'lib.license.maker', 'TEAM-ONLY': 'lib.license.team' };   // language keys, read when shown
 const licenseLabel = (id) => LICENSES[id] || (LICENSE_KEYS[id] ? t(LICENSE_KEYS[id]) : String(id || t('lib.license.none')));
 
+let standardInstalled = false;
+
 export function createLibraryPanel({ root, doc, engine, print, status, ask, dwgModel }) {
+  // STEELMEMBER and PARTSLIST come with the Standard tab (stdlib.js), registered once like CadCraft's other feature sets
+  if (!standardInstalled) { standardInstalled = true; installStandard(commandRegistry.add, commandRegistry.option); }
   let token = store.get(TOKEN_KEY);
   /** A client for a source: 'librarycraft' (or the API path) gets the token; a feed never does. */
   const client = (src = LIBRARYCRAFT) => { const base = !src || src === 'librarycraft' ? LIBRARYCRAFT : src; return new LibraryClient(base, { token: base === LIBRARYCRAFT ? token : null, onTokenRejected: tokenEnded }); };
@@ -49,15 +57,15 @@ export function createLibraryPanel({ root, doc, engine, print, status, ask, dwgM
   /** Shown once, ahead of whatever the reload that dropped the token says next. */
   let ended = '';
   const sayAfterEnd = (s) => { say(ended ? ended + (s ? ' ' + s : '') : s); ended = ''; };
-  let source = 'librarycraft';      // 'librarycraft' | 'files' | feed base URL
-  let view = 'browse';              // browse | updates | credits | feeds
+  let source = 'librarycraft';      // 'librarycraft' | 'files' | 'standard' | feed base URL
+  let view = 'browse';              // browse | updates | credits | parts | feeds
   let cards = [];                   // [{ key, name, maker, model, license, version, category, preview_url, uuid, slug, item?, withdrawn?, from }]
   let pickResolve = null, pending = null, focusUuid = null, loading = 0;
 
   // ---- the dialog ----
   const $ = {};
   const tab = (key, label) => { const b = el('button', { type: 'button', role: 'tab', className: 'cc-tab', 'aria-selected': 'false', dataset: { src: key } }, label); b.addEventListener('click', () => setSource(key)); return b; };
-  $.tabs = el('div', { className: 'cc-tablist', role: 'tablist', 'aria-label': t('lib.panel.library_sources') }, tab('librarycraft', 'LibraryCraft'), tab('files', t('lib.panel.files')), tab('feeds', t('lib.panel.other_feeds')));
+  $.tabs = el('div', { className: 'cc-tablist', role: 'tablist', 'aria-label': t('lib.panel.library_sources') }, tab('librarycraft', 'LibraryCraft'), tab('files', t('lib.panel.files')), tab('standard', t('lib.panel.standard')), tab('feeds', t('lib.panel.other_feeds')));
   $.feedSel = el('select', { className: 'cc-select', 'aria-label': t('lib.panel.feed'), hidden: true });
   $.feedSel.addEventListener('change', () => { if ($.feedSel.value) { source = $.feedSel.value; search(); } });
   $.q = el('input', { type: 'search', className: 'cc-input', placeholder: t('lib.panel.search_name_maker_model'), 'aria-label': t('lib.panel.search_library'), maxLength: 200 });
@@ -66,6 +74,18 @@ export function createLibraryPanel({ root, doc, engine, print, status, ask, dwgM
   $.searchForm = el('form', { className: 'cc-lib-search' }, $.q, $.cat, $.go);
   $.searchForm.addEventListener('submit', (e) => { e.preventDefault(); search(); });
   $.cat.addEventListener('change', () => (source === 'files' ? render() : search()));
+  // ---- Standard: the family, and the options the next Place uses (stdlib.js) ----
+  const stdGroup = (g, label) => el('optgroup', { label }, ...STD_FAMILIES.filter((f) => f.group === g).map((f) => el('option', { value: f.key }, f.label + ' (' + f.source + ')')));
+  $.stdFam = el('select', { className: 'cc-select', 'aria-label': t('lib.panel.std.family') }, stdGroup('sections', t('lib.panel.std.sections')), stdGroup('parts', t('lib.panel.std.parts')));
+  $.stdFam.addEventListener('change', () => { stdOpts = {}; search(); });
+  // typing changes the next Place and redraws the cards' previews in place (never the cards: a click on Place that blurs the
+  // box must still land on its button)
+  const field = (key, label, attrs = {}) => { const i = el('input', { className: 'cc-input', type: 'number', step: 'any', dataset: { std: key }, ...attrs }); i.addEventListener('input', () => { stdOpts[key] = i.value; refreshPreviews(); }); return { input: i, wrap: el('label', { className: 'cc-lib-opt', dataset: { stdOpt: key } }, el('span', {}, label), i) }; };
+  $.stdView = el('select', { className: 'cc-select', dataset: { std: 'view' } }, ...['section', 'elevation', 'member'].map((v) => el('option', { value: v }, t('lib.panel.std.view.' + v))));
+  $.stdView.addEventListener('change', () => { stdOpts.view = $.stdView.value; renderStdFields(); refreshPreviews(); });
+  $.stdFields = { view: { input: $.stdView, wrap: el('label', { className: 'cc-lib-opt', dataset: { stdOpt: 'view' } }, el('span', {}, t('lib.panel.std.view')), $.stdView) },
+    length: field('length', ''), teeth: field('teeth', t('lib.panel.std.teeth'), { min: 6, max: 400, step: 1 }), width: field('width', t('lib.panel.std.width')), bore: field('bore', t('lib.panel.std.bore')) };
+  $.std = el('div', { className: 'cc-lib-std', hidden: true }, $.stdFam, ...Object.values($.stdFields).map((f) => f.wrap));
   $.file = el('input', { type: 'file', className: 'visually-hidden', tabIndex: -1, 'aria-hidden': 'true', accept: '.json,.dwg,.dxf,.ifc,.glb,.gltf,.obj,.rfa,.csv' });
   $.file.addEventListener('change', () => { const f = $.file.files[0]; $.file.value = ''; if (f) readFile(f); });
   $.pickFile = el('button', { type: 'button', className: 'btn-line btn-sm-cc', hidden: true }, el('i', { className: 'bi bi-folder2-open', 'aria-hidden': 'true' }), t('lib.panel.choose_file'));
@@ -74,6 +94,8 @@ export function createLibraryPanel({ root, doc, engine, print, status, ask, dwgM
   $.updates.addEventListener('click', () => checkUpdates());
   $.credits = el('button', { type: 'button', className: 'cc-linkbtn' }, t('lib.panel.library_credits'));
   $.credits.addEventListener('click', () => { view = 'credits'; render(); });
+  $.partsBtn = el('button', { type: 'button', className: 'cc-linkbtn' }, t('lib.panel.parts_list'));
+  $.partsBtn.addEventListener('click', () => { view = 'parts'; say(''); render(); });
   $.sign = el('span', { className: 'cc-lib-sign' });
   $.body = el('div', { className: 'cc-lib-body', 'aria-live': 'polite' });
   $.msg = el('span', { className: 'cc-note', role: 'status' });
@@ -81,8 +103,9 @@ export function createLibraryPanel({ root, doc, engine, print, status, ask, dwgM
   $.dlg = el('dialog', { className: 'cc-dialog cc-lib', 'aria-labelledby': 'cc-lib-h', dataset: { lib: '' } },
     el('div', { className: 'cc-lib-frame' },
       el('div', { className: 'cc-plot-head' }, el('h2', { className: 'cc-h', id: 'cc-lib-h' }, t('lib.panel.library')), $.close),
-      el('div', { className: 'cc-lib-bar' }, $.tabs, $.feedSel, $.pickFile, $.file, el('span', { className: 'cc-lib-links' }, $.updates, $.credits, $.sign)),
+      el('div', { className: 'cc-lib-bar' }, $.tabs, $.feedSel, $.pickFile, $.file, el('span', { className: 'cc-lib-links' }, $.updates, $.credits, $.partsBtn, $.sign)),
       $.searchForm,
+      $.std,
       $.body,
       el('div', { className: 'cc-plot-foot' }, $.msg)));
   root.append($.dlg);
@@ -119,15 +142,44 @@ export function createLibraryPanel({ root, doc, engine, print, status, ask, dwgM
   // ---- sources ----
   const feeds = () => { try { const v = JSON.parse(store.get(FEEDS_KEY, localStorage) || '[]'); return Array.isArray(v) ? v.filter((x) => typeof x === 'string' && feedUrl(x)).slice(0, 20) : []; } catch { return []; } };
   function setSource(key) {
+    ++loading;   // whatever the last source was still loading is no longer wanted
     view = key === 'feeds' && !feeds().length ? 'feeds' : 'browse';
     if (key === 'feeds') { const f = feeds(); source = f[0] || 'feeds'; if (!f.length) view = 'feeds'; }
     else source = key;
     cards = [];
     if (source === 'files') render(); else if (view === 'browse') search(); else render();
   }
-  function srcKey() { return source === 'librarycraft' || source === 'files' ? source : 'feeds'; }
+  function srcKey() { return source === 'librarycraft' || source === 'files' || source === 'standard' ? source : 'feeds'; }
+
+  // ---- Standard (stdlib.js) ----
+  let stdOpts = {};
+  /** The option values for a card: the defaults for its size, then whatever was typed in the fields. */
+  function stdValues(card) {
+    const o = { ...cardDefaults(card.key, card.size) };
+    for (const [k, v] of Object.entries(stdOpts)) if (v !== '' && v !== undefined) o[k] = k === 'view' ? v : Number(v);
+    return o;
+  }
+  let previewTimer = 0;
+  function refreshPreviews() {
+    clearTimeout(previewTimer);
+    previewTimer = setTimeout(() => { for (const c of cards) if (c.std && c.box?.isConnected) c.box.replaceChildren(...stdPreview(c)); }, 200);
+  }
+  function stdSearch() {
+    ++loading;   // a LibraryCraft search still on its way must not land on this tab
+    const r = standardCards($.stdFam.value, $.q.value, 60);
+    cards = r.cards.map((c) => ({ ...c, std: true, license: 'CC0-1.0', version: 1, category: '', maker: '', uuid: '', slug: '' }));
+    say(r.total > cards.length ? t('lib.panel.std.showing', { shown: cards.length, n: r.total }) : t('lib.panel.std.count', { n: r.total }));
+    render();
+  }
+  /** Block name part for a standard card: short and stable ("w12x26-e3000", "iso4017-m10x30"). */
+  function stdSlug(card, o) {
+    const fam = familyOf(card.key);
+    if (fam.group === 'sections') return card.size + '-' + (o.view === 'elevation' ? 'e' + Math.round(o.length) : 's');
+    return fam.id.replace(/^asme-/, '') + '-' + card.size + (o.length ? 'x' + o.length : '') + (o.teeth ? 'z' + o.teeth : '');
+  }
 
   async function search() {
+    if (source === 'standard') { stdSearch(); return; }
     if (source === 'files' || source === 'feeds') { render(); return; }
     view = 'browse';
     const my = ++loading;
@@ -218,8 +270,21 @@ export function createLibraryPanel({ root, doc, engine, print, status, ask, dwgM
 
   // ---- placing ----
   async function place(card) {
-    let item = card.item;
-    if (!item) {
+    let item = card.item, slug = card.slug || '';
+    if (card.std) {
+      const o = stdValues(card);
+      if (o.view === 'member') {                                   // a 3D member: STEELMEMBER asks for its two ends
+        $.dlg.close();
+        await ensureIdle();
+        engine.run('STEELMEMBER');
+        await new Promise((r) => setTimeout(r, 0));
+        if (engine.running === 'STEELMEMBER' && engine.expects === 'string') engine.text(card.size);
+        return;
+      }
+      const r = cardItem(card.key, card.size, o);
+      if (!r.ok) { say(r.error); $.stdFields[r.field]?.input.focus(); return; }
+      item = r.item; slug = stdSlug(card, o);
+    } else if (!item) {
       say('Downloading ' + card.name + '…');
       try { item = await client(card.from).itemJson(card.uuid, card.version); }
       catch (err) { say(err.message); return; }
@@ -232,7 +297,7 @@ export function createLibraryPanel({ root, doc, engine, print, status, ask, dwgM
       const k = await ask({ title: t('lib.panel.withdrawn_item'), text: t('lib.panel.withdrawn_ask', { name: card.name, why: card.withdrawn }), buttons: [['cancel', t('opt.cancel'), 'btn-line'], ['go', t('lib.panel.place_anyway'), 'btn-plot']] });
       if (k !== 'go') return;
     }
-    pending = { item, slug: card.slug || '' };
+    pending = { item, slug };
     if (pickResolve) { $.dlg.close(); return; }       // INSERT is waiting: hand it over
     $.dlg.close();
     const p = pending; pending = null;
@@ -296,9 +361,16 @@ export function createLibraryPanel({ root, doc, engine, print, status, ask, dwgM
     let u = null;
     try { u = card.preview_url ? new URL(String(card.preview_url), location.href) : null; } catch { u = null; }
     if (u && u.origin === location.origin && /^https?:$/.test(u.protocol)) box.append(el('img', { src: u.href, alt: '', loading: 'lazy' }));
+    else if (card.std) { card.box = box; box.append(...stdPreview(card)); }
     else if (card.item) box.append(planCanvas(card.item));
     else box.append(el('i', { className: 'bi bi-box', 'aria-hidden': 'true' }));
     return box;
+  }
+  /** A standard card's drawing with the options as they are now (a 3D member shows its section). */
+  function stdPreview(card) {
+    const o = stdValues(card);
+    const r = cardItem(card.key, card.size, o.view === 'member' ? { ...o, view: 'section' } : o);
+    return r.ok ? [planCanvas(r.item)] : [];
   }
   function cardEl(card) {
     const placeBtn = el('button', { type: 'button', className: 'btn-plot btn-sm-cc' }, t('lib.panel.place'));
@@ -309,7 +381,7 @@ export function createLibraryPanel({ root, doc, engine, print, status, ask, dwgM
       el('div', { className: 'cc-lib-meta' },
         el('p', { className: 'cc-lib-name' }, card.name || t('lib.panel.untitled')),
         mm ? el('p', { className: 'cc-muted' }, mm) : null,
-        el('p', { className: 'cc-lib-tags' }, badge(card.license), el('span', { className: 'cc-muted' }, t('lib.panel.version', { version: card.version })), card.category ? el('span', { className: 'cc-muted' }, catLabel(card.category)) : null),
+        el('p', { className: 'cc-lib-tags' }, badge(card.license), card.std ? el('span', { className: 'cc-muted' }, card.source) : el('span', { className: 'cc-muted' }, t('lib.panel.version', { version: card.version })), card.category ? el('span', { className: 'cc-muted' }, catLabel(card.category)) : null),
         card.withdrawn ? el('p', { className: 'cc-lib-warn' }, el('i', { className: 'bi bi-exclamation-triangle', 'aria-hidden': 'true' }), ' Withdrawn: ' + card.withdrawn) : null),
       placeBtn);
   }
@@ -317,12 +389,17 @@ export function createLibraryPanel({ root, doc, engine, print, status, ask, dwgM
     for (const b of $.tabs.children) b.setAttribute('aria-selected', String(b.dataset.src === srcKey() && (view === 'browse' || view === 'feeds')));
     $.searchForm.hidden = !(view === 'browse');
     $.q.disabled = $.go.disabled = source === 'files';
+    $.q.placeholder = source === 'standard' ? t('lib.panel.std.search') : t('lib.panel.search_name_maker_model');
+    $.cat.hidden = source === 'standard';
+    $.std.hidden = !(source === 'standard' && view === 'browse');
+    if (!$.std.hidden) renderStdFields();
     $.pickFile.hidden = !(source === 'files' && view === 'browse');
     const fl = feeds();
     $.feedSel.hidden = !(srcKey() === 'feeds' && fl.length);
     $.feedSel.replaceChildren(...fl.map((f) => el('option', { value: f, selected: f === source }, f)));
     if (view === 'updates') { renderUpdates(extra); return; }
     if (view === 'credits') { renderCredits(); return; }
+    if (view === 'parts') { renderParts(); return; }
     if (view === 'feeds' || (srcKey() === 'feeds' && !fl.length)) { renderFeeds(); return; }
     const cat = $.cat.value;
     const shown = source === 'files' && cat ? cards.filter((c) => c.category === cat) : cards;
@@ -379,6 +456,39 @@ export function createLibraryPanel({ root, doc, engine, print, status, ask, dwgM
       document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 10000);
     });
     $.body.replaceChildren(el('h3', { className: 'cc-props-sub' }, t('lib.panel.library_credits')), el('ul', { className: 'cc-lib-rows cc-lib-credits' }, ...rows), el('p', { className: 'cc-lib-actions' }, all, csv, back));
+  }
+
+  /** Show the option fields the chosen family takes, with this family's defaults as placeholders. */
+  function renderStdFields() {
+    const fam = familyOf($.stdFam.value);
+    if (!fam) return;
+    const first = cards[0]?.std ? stdValues(cards[0]) : cardDefaults(fam.key, '');
+    const isSec = fam.group === 'sections', member = isSec && (stdOpts.view || 'section') === 'member';
+    for (const [k, f] of Object.entries($.stdFields)) {
+      const on = k === 'view' ? isSec : k === 'length' ? (isSec ? (stdOpts.view || 'section') === 'elevation' : fam.options.includes('length')) : fam.options.includes(k);
+      f.wrap.hidden = !on;
+      if (k !== 'view' && on) { f.input.value = stdOpts[k] ?? ''; f.input.placeholder = String(first[k] ?? ''); }
+    }
+    $.stdView.value = stdOpts.view || 'section';
+    $.stdFields.length.wrap.firstChild.textContent = t('lib.panel.std.length', { unit: fam.units === 'in' ? 'in' : 'mm' });
+    $.std.dataset.member = member ? '1' : '';
+  }
+
+  function renderParts() {
+    const rows = partsList(doc);
+    const back = el('button', { type: 'button', className: 'cc-linkbtn' }, t('lib.panel.back_library'));
+    back.addEventListener('click', () => { view = 'browse'; render(); });
+    if (!rows.length) { $.body.replaceChildren(el('h3', { className: 'cc-props-sub' }, t('lib.panel.parts_list')), el('p', {}, t('std.parts.none')), back); return; }
+    const head = ['item', 'qty', 'part', 'standard', 'size', 'length', 'material'].map((k) => el('th', { scope: 'col' }, t('std.parts.col.' + k)));
+    const body = rows.map((r) => el('tr', {}, ...[r.numbers.join(', ') || '–', String(r.qty), r.type, r.std, r.size, r.length, r.material].map((v) => el('td', {}, v))));
+    const csv = el('button', { type: 'button', className: 'btn-plot btn-sm-cc' }, t('lib.panel.download_csv'));
+    csv.addEventListener('click', () => {
+      const a = el('a', { href: URL.createObjectURL(new Blob([partsCsv(rows)], { type: 'text/csv' })), download: t('lib.panel.parts_file', { name: doc.meta.name || 'Drawing1' }) });
+      document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    });
+    $.body.replaceChildren(el('h3', { className: 'cc-props-sub' }, t('lib.panel.parts_list')),
+      el('div', { className: 'cc-lib-parts' }, el('table', { className: 'cc-table' }, el('thead', {}, el('tr', {}, ...head)), el('tbody', {}, ...body))),
+      el('p', { className: 'cc-lib-actions' }, csv, back), el('p', { className: 'cc-note' }, t('lib.panel.parts_note')));
   }
 
   function renderFeeds() {

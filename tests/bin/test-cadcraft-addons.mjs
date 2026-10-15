@@ -328,6 +328,122 @@ else {
   ok(!Cmd.lookup('NOTE'), 'switched off: NOTE is gone');
 }
 
+// the 2D example add-on of the public add-ons repo (0.5 AO.5), against the real CadCraft modules: draw, Properties, DWG/DXF, export
+section('Example add-on: Outline (repos/addons/examples/outline)');
+const EXAMPLE = path.resolve(ROOT, '..', 'repos/addons/examples/outline');
+if (!fs.existsSync(path.join(EXAMPLE, 'addon.json'))) console.log('  (no ' + EXAMPLE + ': skipped)');
+else {
+  const ex = await CA.startAddons({
+    doc, engine: eng, host, print: host.print, redraw: () => {}, base: pathToFileURL(path.dirname(EXAMPLE) + '/').href, storage, packages: A.packageStore(null), noGlobal: true,
+    fetchJson: async (u) => (/\/index\.json$/.test(u) ? { addons: ['outline'] } : (() => { try { return JSON.parse(fs.readFileSync(fileURLToPath(u), 'utf8')); } catch { return null; } })()),
+    importer: (u) => import(u),
+  });
+  const st = ex.list().find((x) => x.id === 'com.example.outline');
+  ok(st && st.state === 'active', 'the Outline example activates in CadCraft', JSON.stringify(st && [st.state, st.detail]));
+  const steps = doc.undoStack.length;
+  await type('OUTLINE', '200,200', '240,200', '240,220', '200,220', '', 'Panel A');
+  const isOut = (e) => e.xd && e.xd.CC_COM_EXAMPLE_OUTLINE;
+  const o = doc.all().find(isOut);
+  ok(o && o.type === 'insert' && o.x === 200 && o.y === 200 && doc.undoStack.length === steps + 1, 'OUTLINE by typing: one object at its first corner, one undo step', JSON.stringify(o && [o.x, o.y]));
+  ok(o && doc.blocks.get(o.block)?.entities.some((e) => e.type === 'poly' && e.closed) && doc.blocks.get(o.block)?.entities.some((e) => e.s === 'Panel A'), 'drawn as a closed outline with its tag');
+  const { saveDwg } = await load('dwg-save.js');
+  const { writeDxf, readDxf } = await load('dxf.js');
+  const { readDwg } = await load('dwg/read.js');
+  const { importDwg } = await load('dwg-import.js');
+  for (const F of [
+    { key: 'DWG 2018', write: (d) => saveDwg(d, { version: '2018' }).bytes, read: (b) => importDwg(readDwg(b)) },
+    { key: 'DXF R12', write: (d) => writeDxf(d).text, read: (t) => readDxf(t) },
+  ]) {
+    const d2 = new Doc();
+    ex.kinds.attach(d2);
+    d2.load(F.read(F.write(doc)));
+    const o2 = d2.all().find(isOut);
+    const rows = o2 ? String(ex.exporters().find((x) => x.addon === 'com.example.outline')?.write(d2) || '').trim().split('\r\n') : [];
+    ok(o2 && rows.includes('Panel A,800.0000,120.0000,4,0'), F.key + ': saved and reopened, the outline keeps its tag and shape; EXPORT writes its CSV row', JSON.stringify(rows));
+  }
+  await ex.loader.setEnabled('com.example.outline', false);
+  ok(!Cmd.lookup('OUTLINE') && !ex.exporters().length, 'switched off: OUTLINE and the exporter are gone');
+}
+
+// bundled add-ons that start off (0.5 api.default-off, asked by `apparel`): addon.json "default": "off"
+section('A bundled add-on that starts off (api.default-off)');
+if (!fs.existsSync(path.join(EXAMPLE, 'addon.json'))) console.log('  (no ' + EXAMPLE + ': skipped)');
+else {
+  const exManifest = JSON.parse(fs.readFileSync(path.join(EXAMPLE, 'addon.json'), 'utf8'));
+  ok(A.checkManifest({ ...exManifest, default: 'off' }, { app: 'cadcraft', apiVersion: '1.0' }).manifest?.default === 'off', 'checkManifest keeps "default": "off"');
+  ok(!A.checkManifest({ ...exManifest, default: 'maybe' }, { app: 'cadcraft', apiVersion: '1.0' }).ok, '…and refuses any other value than "on" / "off"');
+  const mem = new Map();
+  const store2 = { getItem: (k) => (mem.has(k) ? mem.get(k) : null), setItem: (k, v) => mem.set(k, String(v)), removeItem: (k) => mem.delete(k) };
+  const boot = () => CA.startAddons({
+    doc, engine: eng, host, print: host.print, redraw: () => {}, base: pathToFileURL(path.dirname(EXAMPLE) + '/').href, storage: store2, packages: A.packageStore(null), noGlobal: true,
+    fetchJson: async (u) => (/\/index\.json$/.test(u) ? { addons: ['outline'] } : /addon\.json$/.test(u) ? { ...exManifest, default: 'off' } : null),
+    importer: (u) => import(u),
+  });
+  let b = await boot();
+  const stateOf = (x) => x.list().find((a) => a.id === 'com.example.outline')?.state;
+  ok(stateOf(b) === 'off' && !Cmd.lookup('OUTLINE'), 'it starts off: listed, not activated');
+  await b.loader.setEnabled('com.example.outline', true);
+  ok(stateOf(b) === 'active' && Cmd.lookup('OUTLINE'), 'switched on in Settings: active');
+  await b.loader.setEnabled('com.example.outline', false);
+  await b.loader.setEnabled('com.example.outline', true);
+  await b.loader.setEnabled('com.example.outline', false);
+  await b.loader.setEnabled('com.example.outline', true);
+  const prefs = JSON.parse(store2.getItem('cc-addons:cadcraft'));
+  ok(prefs.on['com.example.outline'] === true && !prefs.off['com.example.outline'], 'the choice is remembered (cc-addons:<app> on)');
+  await b.loader.setEnabled('com.example.outline', false);
+  b = await boot();
+  ok(stateOf(b) === 'off', 'switched off again: still off after a restart');
+  await b.loader.setEnabled('com.example.outline', true);
+  await b.loader.setEnabled('com.example.outline', false);
+  await b.loader.setEnabled('com.example.outline', true);
+  const saved = store2.getItem('cc-addons:cadcraft');
+  await b.loader.setEnabled('com.example.outline', false);   // free OUTLINE in this process (a real restart is a new page)
+  store2.setItem('cc-addons:cadcraft', saved);
+  b = await boot();
+  ok(stateOf(b) === 'active' && Cmd.lookup('OUTLINE'), 'switched on: active after a restart too');
+  await b.loader.setEnabled('com.example.outline', false);
+  const inst = b.loader.entryFor({ ...exManifest, id: 'com.example.other', default: 'off' }, { source: 'installed', key: 'x' });
+  ok(inst.state === 'ready', 'an installed package ignores "default": installing it was the person\'s choice');
+  ok(!mem.has('cc-addons:cadcraft') || !JSON.parse(store2.getItem('cc-addons:cadcraft')).on['com.example.outline'], 'switching off forgets the "on"');
+}
+
+// 0.5 api.solids (cad-mep): solids on the 3D tab kept by an add-on, in the drawing's undo step
+section('api.solids: an add-on\'s solids on the 3D tab (0.5, cad-mep)');
+{
+  const { solidsOf } = await load('model3d.js');
+  const sapi = globalThis.__testPipes;
+  const d = new Doc();
+  d.meta.units = 'millimeters';
+  const box = (x0, y0, z0, s) => {
+    const p = [[x0, y0, z0], [x0 + s, y0, z0], [x0 + s, y0 + s, z0], [x0, y0 + s, z0]].map((q) => q.slice());
+    const top = p.map((q) => [q[0], q[1], q[2] + s]);
+    return [p.slice().reverse(), top, ...[0, 1, 2, 3].map((i) => [p[i], p[(i + 1) % 4], top[(i + 1) % 4], top[i]])];
+  };
+  const mine = () => [...d.model3d.root.insts.values()].filter((i) => / \[test\.pipes:/.test(i.name || ''));
+  const n0 = d.undoStack.length;
+  d.change('x', () => { d.add({ type: 'line', x1: 0, y1: 0, x2: 1, y2: 0, layer: '0' }); sapi.solids.set('r1', { name: 'Run 1', polys: box(0, 0, 0, 1000), color: '#336699', tag: 'Pipes' }, d); });
+  const s1 = solidsOf(d.model3d);
+  ok(d.undoStack.length === n0 + 1 && s1.length === 1 && s1[0].closed && near(s1[0].volume, 1, 1e-9), 'set(): a 1000 mm cube in a drawing in mm = 1 m³, closed, in the same undo step as the 2D edit', JSON.stringify(s1));
+  ok(mine().length === 1 && mine()[0].color === '#336699' && mine()[0].tag === 'Pipes' && d.model3d.tags.some((g) => g.name === 'Pipes') && JSON.stringify(sapi.solids.keys(d)) === '["r1"]', 'named for the add-on and key, coloured, tagged; keys() lists it');
+  d.change('y', () => { sapi.solids.apply({ r1: { name: 'Run 1', polys: box(0, 0, 0, 2000) }, r2: { name: 'Run 2', polys: box(5000, 0, 0, 1000) } }, d); });
+  const s2 = solidsOf(d.model3d);
+  ok(s2.length === 2 && s2.some((s) => near(s.volume, 8, 1e-9)) && mine().length === 2, 'apply(): r1 replaced (8 m³), r2 added — no duplicate', JSON.stringify(s2.map((s) => s.volume)));
+  d.undo();
+  ok(solidsOf(d.model3d).length === 1 && near(solidsOf(d.model3d)[0].volume, 1, 1e-9), 'undo: back to the one cube');
+  d.change('z', () => { sapi.solids.remove('r1', d); });
+  ok(!solidsOf(d.model3d).length && [...d.model3d.defs.values()].every((x) => x.id === 'root'), 'remove(): the placement and its definition go');
+  // smooth: a 24-sided prism's side edges (15° apart) go soft at 20°, its rims (90°) stay hard
+  const ring = Array.from({ length: 24 }, (_, i) => [100 * Math.cos(i * Math.PI / 12), 100 * Math.sin(i * Math.PI / 12)]);
+  const prism = [ring.map(([x, y]) => [x, y, 0]).reverse(), ring.map(([x, y]) => [x, y, 500]), ...ring.map(([x, y], i) => { const [u, v] = ring[(i + 1) % 24]; return [[x, y, 0], [u, v, 0], [u, v, 500], [x, y, 500]]; })];
+  d.change('s', () => { sapi.solids.set('cyl', { name: 'Pipe', polys: prism, smooth: 20 }, d); });
+  const cdef = d.model3d.def(mine()[0].def);
+  const soft = [...cdef.edges.values()].filter((e) => e.soft).length, hard = [...cdef.edges.values()].filter((e) => !e.soft).length;
+  ok(soft === 24 && hard === 48, 'smooth 20°: the 24 side edges are soft, the 48 rim edges hard', soft + ' / ' + hard);
+  let threw = null;
+  try { sapi.solids.set('bad key', null, d); } catch (e) { threw = e; }
+  ok(threw, 'a bad key is refused');
+}
+
 // pass-through (A.5): needs cad-files' e.xd in dwg-props.js
 section('Pass-through in DWG and DXF (A.5)');
 const DP = await load('dwg-props.js');

@@ -36,10 +36,6 @@ class CadView3D extends View3D {
     this.scene.add(this.lineGroup);
     this.linesKey = null;
   }
-  build() {
-    super.build();
-    this.buildLines();
-  }
   buildLines() {
     for (const o of [...this.lineGroup.children]) { this.lineGroup.remove(o); o.geometry?.dispose(); o.material?.dispose(); }
     const { batches, bbox } = this.ws.lines();
@@ -58,6 +54,12 @@ class CadView3D extends View3D {
     this.lineGroup.updateMatrixWorld(true);
     const r = Math.hypot(bbox.max[0] - bbox.min[0], bbox.max[1] - bbox.min[1]);
     this.radius = Math.max(this.radius || 0, r, 10);
+  }
+  build() {
+    super.build();
+    this.buildLines();
+    const c = this.ws.cloudBox?.();   // a point cloud must not fall outside the clip range
+    if (c) this.radius = Math.max(this.radius || 0, Math.hypot(c.max[0] - c.min[0], c.max[1] - c.min[1], c.max[2] - c.min[2]));
   }
   draw() {
     const key = this.ws.doc.version + '|' + this.ws.k;
@@ -86,6 +88,33 @@ export function createWorkspace3D({ root, doc, engine, host, print, submit, clos
     },
   }, ws);
   ws.view3d = view;
+  // a point cloud (0.5 SG.1, cloud-cad.js host.cloud) drawn with pointcloud-three.js: its lowest point on the ground, the
+  // Model tab's slice as a band of the same height; pointcloud-three.js loads with the first cloud
+  let cloud3d = null;
+  ws.cloudBox = () => {
+    const pc = host.cloud;
+    if (!pc?.has() || !pc.visible || !cloud3d?.points) return null;
+    const b = cloud3d.box();
+    return b ? { min: b.min.toArray(), max: b.max.toArray() } : null;
+  };
+  ws.cloudChanged = async () => {
+    const pc = host.cloud;
+    if (!pc?.has() || !pc.visible) { if (cloud3d) { cloud3d.dispose(); } view.builtFor = null; view.invalidate(); return; }
+    if (!cloud3d) {
+      const { CloudLayer } = await import('./pointcloud-three.js');
+      cloud3d ||= new CloudLayer({ renderer: view.renderer, camera: () => view.tcam, parent: view.scene, render: () => view.invalidate() });
+      cloud3d.setPixelRatio(view.renderer.getPixelRatio());
+    }
+    if (cloud3d.cloud !== pc.cloud) cloud3d.set(pc.cloud, pc.matrix3d(ws.k)); else cloud3d.setMatrix(pc.matrix3d(ws.k));
+    cloud3d.setColors(pc.colors);
+    cloud3d.setSize(pc.size);
+    const s = pc.sliceSpec();
+    cloud3d.setSlice(pc.slice.on ? { normal: [0, 0, 1], at: s.h * ws.k, half: (s.thick * ws.k) / 2 } : null);
+    view.builtFor = null;   // the clip range takes the cloud in
+    view.invalidate();
+  };
+  ws.cloud3d = () => cloud3d;   // for tests
+  ws.cloudChanged();
   // the corner indicator (Settings › CadCraft): view cube top right, or the X/Y/Z axis icon bottom left (or none)
   const cubeOpts = cameraCubeOptions(ws.cam, {
     invalidate: () => view.invalidate(),

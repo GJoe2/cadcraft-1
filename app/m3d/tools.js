@@ -25,7 +25,7 @@
  */
 import {
   EPS, add, sub, mul, dot, cross, len, norm, dist, apply, applyDir, translation, rotation, scaling, planeFrom, rayPlane, mmul,
-  newell, frame, to2,
+  newell, frame, to2, rayTri,
 } from './vec.js';
 import { infer, pick, pickWindow, alongLine, pickDim, pickSection, angleLayout, formatDeg, TIPS } from './infer.js';
 import {
@@ -38,7 +38,7 @@ import { collider } from './collide.js';
 import { t } from "./i18n.js";
 
 /** Tool names in the page's language (getters: the catalog is read when a name is asked for). */
-export const TOOL_NAMES = Object.defineProperties({}, Object.fromEntries(['select', 'line', 'rect', 'circle', 'polygon', 'arc', 'arcc', 'curve', 'follow', 'offset', 'paint', 'push', 'move', 'rotate', 'scale', 'erase', 'tape', 'protractor', 'dim', 'section', 'orbit', 'pan', 'zoom', 'place', 'paste', 'pick', 'axes', 'sculpt'].map((k) => [k, { get: () => t('m3d.toolname.' + k), enumerable: true }])));
+export const TOOL_NAMES = Object.defineProperties({}, Object.fromEntries(['select', 'line', 'rect', 'circle', 'polygon', 'arc', 'arcc', 'curve', 'follow', 'offset', 'paint', 'push', 'move', 'rotate', 'scale', 'erase', 'tape', 'protractor', 'dim', 'section', 'orbit', 'pan', 'zoom', 'place', 'paste', 'pick', 'axes', 'sculpt', 'light'].map((k) => [k, { get: () => t('m3d.toolname.' + k), enumerable: true }])));
 /** Single-key shortcuts (lower case; ' ' = Space). */
 export const TOOL_KEYS = { ' ': 'select', l: 'line', r: 'rect', c: 'circle', n: 'polygon', a: 'arc', f: 'offset', b: 'paint', p: 'push', m: 'move', q: 'rotate', s: 'scale', e: 'erase', t: 'tape', d: 'dim', o: 'orbit', h: 'pan', z: 'zoom' };
 
@@ -64,7 +64,7 @@ export class Tools {
     if (this.tool) this.tool.cancel();
     this.name = name;
     this.lock = null;
-    const C = { select: SelectTool, line: LineTool, rect: RectTool, circle: CircleTool, polygon: CircleTool, arc: ArcTool, arcc: ArcCenterTool, curve: CurveTool, follow: FollowTool, offset: OffsetTool, paint: PaintTool, push: PushTool, move: MoveTool, rotate: RotateTool, scale: ScaleTool, erase: EraseTool, tape: TapeTool, protractor: ProtractorTool, dim: DimTool, section: SectionTool, orbit: CamTool, pan: CamTool, zoom: CamTool, place: PlaceTool, paste: PasteTool, pick: PickTool, axes: AxesTool, sculpt: SculptTool }[name] || SelectTool;
+    const C = { select: SelectTool, line: LineTool, rect: RectTool, circle: CircleTool, polygon: CircleTool, arc: ArcTool, arcc: ArcCenterTool, curve: CurveTool, follow: FollowTool, offset: OffsetTool, paint: PaintTool, push: PushTool, move: MoveTool, rotate: RotateTool, scale: ScaleTool, erase: EraseTool, tape: TapeTool, protractor: ProtractorTool, dim: DimTool, section: SectionTool, orbit: CamTool, pan: CamTool, zoom: CamTool, place: PlaceTool, paste: PasteTool, pick: PickTool, axes: AxesTool, sculpt: SculptTool, light: LightTool }[name] || SelectTool;
     this.tool = new C(this, name, arg);
     this.host.toolSet?.(name);
     this.host.overlay(null);
@@ -924,6 +924,12 @@ class OffsetTool extends ClickTool {
     if (Math.abs(this.d) > EPS) this.make(this.d);
   }
   up() {}
+  /** Done (touch bar): keep the distance the drag left, so a second tap can't nudge it (Warren, 2026-10-15). */
+  finish() {
+    if ((this.fid === null && !this.chain) || !(Math.abs(this.d) > EPS)) return false;
+    this.make(this.d);
+    return true;
+  }
   make(d) {
     const T = this.T, def = T.ctx().def;
     try {
@@ -973,7 +979,7 @@ class PaintTool extends Tool {
       const picked = s.t === 'f' ? def.faces.get(s.id)?.color || this.h.model.pathColor(this.h.path) : def.insts.get(s.id)?.color || null;
       T.paintColor = picked || null;
       this.h.paintChanged?.(T.paintColor);
-      this.h.print(picked ? t('m3d.tool.picked_up', { color: picked }) : t('m3d.tool.picked_up_the_default_color'));
+      this.h.print(picked ? t('m3d.tool.picked_up', { color: this.h.paintName?.(picked) || picked }) : t('m3d.tool.picked_up_the_default_color'));
       return;
     }
     const inSel = this.h.sel.some((x) => x.t === s.t && x.id === s.id);
@@ -990,7 +996,7 @@ class PaintTool extends Tool {
     this.h.changed();
     const n = fids.length + iids.length;
     const what = fids.length && iids.length ? t('m3d.tool.paint_both', { faces: fids.length, groups: iids.length }) : fids.length ? t('m3d.tool.paint_faces', { n: fids.length }) : t('m3d.tool.paint_groups', { n: iids.length });
-    this.h.print(c ? t('m3d.tool.painted', { what, color: c }) : t('m3d.tool.painted_default', { what }));
+    this.h.print(c ? t('m3d.tool.painted', { what, color: this.h.paintName?.(c) || c }) : t('m3d.tool.painted_default', { what }));   // paintName: a material's name (0.5 RC.7)
     void n;
   }
 }
@@ -1012,12 +1018,21 @@ class PushTool extends ClickTool {
     }
     let d;
     const r = this.T.snap(ev, { scene: this.sc0, skip: (o, t) => same(o.path, this.h.path) && t === 'f' && o.id === this.fid });
-    // snap the height to points and edges (another box's top corner, a guide); a face under the
-    // cursor says nothing about depth, so otherwise follow the cursor along the face's normal
-    if (['end', 'mid', 'guidept', 'edge', 'guide'].includes(r.kind)) d = dot(sub(r.p, this.p0), this.n);
+    // snap the height to points and edges (another box's top corner, a guide) and to a face parallel to the
+    // pushed one (the box's top around a recess: the two end level), unless the pushed face hides it; a face
+    // at an angle says nothing about depth, so otherwise follow the cursor along the face's normal
+    const at = ['end', 'mid', 'guidept', 'edge', 'guide'].includes(r.kind) ? r
+      : (r.kind === 'face' || r.kind === 'center') && r.face && Math.abs(dot(r.face.n, this.n)) > 1 - 1e-6 && !this.hides(ev, r.p) ? { p: r.p, kind: 'face' } : null;
+    if (at) d = dot(sub(at.p, this.p0), this.n);
     else { const a = alongLine(this.h.cam, ev.x, ev.y, this.p0, this.n); d = a ? a.s : 0; }
     this.apply(d);
-    this.h.overlay({ marker: ['end', 'mid', 'guidept', 'edge', 'guide'].includes(r.kind) ? this.marker(r) : null, tip: this.fmt(Math.abs(this.d)) + (this.stopped ? t('m3d.tool.stopped_where_it_touches') : ''), lines: [{ a: this.p0, b: add(this.p0, mul(this.n, this.d)), kind: 'axis', dash: true }] });
+    const tip = at && at.kind === 'face' && !this.stopped ? TIPS.face : this.fmt(Math.abs(this.d)) + (this.stopped ? t('m3d.tool.stopped_where_it_touches') : '');
+    this.h.overlay({ marker: at ? this.marker(at) : null, tip, lines: [{ a: this.p0, b: add(this.p0, mul(this.n, this.d)), kind: 'axis', dash: true }] });
+  }
+  /** Does the pushed face, where it was, lie in front of point p under the cursor? */
+  hides(ev, p) {
+    const ray = this.h.cam.ray(ev.x, ev.y), tp = dot(sub(p, ray.o), ray.d) / dot(ray.d, ray.d);
+    return (this.f0 ? this.f0.tris : []).some(([a, b, c]) => { const s = rayTri(ray.o, ray.d, a, b, c); return s !== null && s < tp - 1e-9 * Math.max(1, tp); });
   }
   apply(d) {
     const T = this.T, k = this.k;
@@ -1042,6 +1057,7 @@ class PushTool extends ClickTool {
       const f = sc.faces.find((x) => x.id === s.id && same(x.path, this.h.path));
       const ray = this.h.cam.ray(ev.x, ev.y), g = rayPlane(ray.o, ray.d, f.plane);
       this.fid = s.id;
+      this.f0 = f;
       this.n = f.n;
       this.p0 = g ? g.p : f.tris[0][0];
       this.k = 1 / Math.max(len(this.T.localDir(this.n)), 1e-9) === 0 ? 1 : len(this.T.localDir(this.n));
@@ -1059,6 +1075,8 @@ class PushTool extends ClickTool {
     if (Math.abs(this.d) <= EPS) { this.h.model.abort(); this.reset(); this.h.changed(); return; }
     this.h.model.commit(t('m3d.undo.push_pull'));
     this.last = { d: this.d };
+    // a distance typed next changes this push, as if typed while pushing (no pending click on a tablet)
+    this.amend = { step: this.h.model.lastStep(), fid: this.fid, k: this.k, sign: Math.sign(this.d) || 1, coll: this.coll, n: this.n, path: this.h.path };
     this.reset();
     this.h.overlay(null);
     this.h.changed();
@@ -1088,7 +1106,21 @@ class PushTool extends ClickTool {
       this.finish();
       return true;
     }
-    return false;
+    return this.amendLast(v.v);
+  }
+  /** Change the push just finished to distance v (same face, same direction; a minus sign turns it round). */
+  amendLast(v) {
+    const a = this.amend;
+    if (!a || !(Math.abs(v) > EPS) || !same(a.path, this.h.path)) return false;
+    let d = a.sign * v, stopped = false;
+    if (a.coll) { const r = a.coll.clamp(mul(a.n, d)); if (r.hit) { d = Math.sign(d) * len(r.delta); stopped = true; } }
+    let res = null;
+    if (!this.h.model.amendLast(a.step, (m) => { res = pushPull(m.context(this.h.path).def, a.fid, d * a.k); if (!res || !res.ok) throw new Error('push'); })) return false;
+    const got = res.distance / a.k;
+    this.last = { d: got };
+    this.h.changed();
+    this.h.print(stopped ? t('m3d.tool.stopped_at', { d: this.fmt(Math.abs(got)) }) : '');
+    return true;
   }
   cancel() { if (this.fid !== null) this.h.model.abort(); this.reset(); this.h.changed(); }
 }
@@ -2192,6 +2224,49 @@ class PlaceTool extends ClickTool {
     this.h.changed();
     this.T.set('select');
   }
+}
+// ---- light (0.5 RC.11 (d)): a lamp for rendered pictures. arg {kind: 'point'|'spot'|'area', ...defaults} ----
+/**
+ * Click where the lamp goes (snapping as everywhere). On a face it sits off the face on the side you look from: a bulb
+ * hangs 0.25 m below a ceiling, a spot 0.05 m, an area panel lies on the face, facing out. A spot asks a second click: what
+ * it points at. → host.lightPlaced(id); one undo step. World coordinates (lamps are not inside groups).
+ */
+class LightTool extends ClickTool {
+  constructor(T, name, arg) { super(T, name); this.o = arg && typeof arg === 'object' ? arg : { kind: 'point' }; this.at = null; }
+  get lockable() { return false; }
+  get hint() { return this.at ? t('m3d.tool.light_aim') : t('m3d.tool.light_where', { kind: t('m3d.light.' + this.o.kind) }); }
+  /** The lamp's point for a snap: off the face toward the eye. → {p, n} */
+  spot(r) {
+    let n = r.face?.n ? norm(r.face.n) : null;
+    if (n && dot(n, sub(this.h.cam.eye, r.p)) < 0) n = mul(n, -1);
+    const off = this.o.kind === 'point' ? 0.25 : this.o.kind === 'spot' ? 0.05 : 0.005;
+    return { p: n ? add(r.p, mul(n, off)) : r.p.slice(), n };
+  }
+  hover(ev) {
+    this.lastEv = ev;
+    const r = this.T.snap(ev);
+    this.cur = r;
+    const lines = this.at ? [{ a: this.at.p, b: r.p, kind: 'axis', dash: true }] : [];
+    this.h.overlay({ lines, marker: this.marker(r), tip: this.at ? t('m3d.tool.light_aim') : r.tip });
+  }
+  pickPoint(ev) {
+    const r = this.cur || this.T.snap(ev);
+    if (this.o.kind === 'spot' && !this.at) { this.at = this.spot(r); this.busy = true; this.h.tip(this.hint); return; }
+    let L;
+    if (this.at) {
+      const d = sub(r.p, this.at.p);
+      L = { ...this.o, kind: 'spot', p: this.at.p, dir: len(d) > 1e-6 ? norm(d) : [0, 0, -1] };
+    } else {
+      const s = this.spot(r);
+      L = { ...this.o, p: s.p, dir: this.o.kind === 'area' ? (s.n || [0, 0, -1]) : [0, 0, -1] };
+    }
+    const id = this.h.model.change(t('m3d.undo.light'), (m) => m.addLight(L));
+    this.at = null; this.busy = false;
+    this.h.changed();
+    this.h.lightPlaced?.(id);
+    this.T.set('select');
+  }
+  cancel() { this.at = null; this.busy = false; }
 }
 // ---- paste (the clipboard follows the cursor; a click puts it down) ----
 class PasteTool extends ClickTool {

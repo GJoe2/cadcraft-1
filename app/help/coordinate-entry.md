@@ -18,6 +18,9 @@ When the prompt asks for a point, type one of these and press {{key:Enter}}:
 | `@d<a` | Relative polar: distance and angle from the last point | `@1500<45` |
 | `d<a` | Absolute polar: distance and angle from the origin | `3000<90` |
 | a single number | Direct distance: that far from the base point, toward the crosshair | `1200` |
+| `*x,y`, `@*dx,dy` | World coordinates while a UCS is set | `*0,0` |
+
+With a UCS set ({{cmd:UCS}}), `x,y`, `@dx,dy` and the angle in `d<a` are measured along the UCS axes. See [Turn the view and use your own coordinates](topic:ucs-and-turned-view).
 
 Or click in the drawing; object snaps and Ortho apply to clicks.
 
@@ -87,6 +90,6 @@ Pressing {{key:Enter}} after one value without {{key:Tab}} works as direct dista
 
 ## The coordinate display
 
-The status bar shows the crosshair's X and Y, after snaps and Ortho. While a command has a base point it adds `Δ` with the distance and angle from that point, for example `Δ 1500 < 30°`: the numbers you would type as `@1500<30`.
+The status bar shows the crosshair's X and Y (in the UCS when one is set), after snaps and Ortho. While a command has a base point it adds `Δ` with the distance and angle from that point, for example `Δ 1500 < 30°`: the numbers you would type as `@1500<30`.
 
 Use {{cmd:ID}} to print a point's coordinates and {{cmd:DIST}} to measure between two points.

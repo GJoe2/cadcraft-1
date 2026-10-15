@@ -89,6 +89,32 @@ export function mSimilar(m) {
 
 const ELLIPSE_STEPS = 72;
 
+/**
+ * Construction lines (0.5 DR.6): `xline` {x, y, dx, dy} runs both ways through (x, y), `ray` {x, y, dx, dy} one way from
+ * it; (dx, dy) is a unit direction. They have no bounds (ZOOM Extents and every extents leave them out), are drawn by
+ * clipping to what is on screen (clipInfinite), and stand in as one segment FAR long each way wherever geometry needs
+ * primitives (intersections, picking, trimming). Trimmed or broken, an xline gives rays and a ray gives lines (subEntity).
+ */
+export const UNBOUNDED = new Set(['xline', 'ray']);
+export const FAR = 1e9;
+/** A unit direction (dx, dy), or null for a zero one. */
+export function unitDir(dx, dy) { const L = Math.hypot(dx, dy); return L > EPS ? { dx: dx / L, dy: dy / L } : null; }
+/**
+ * The part of the line p + t·d (t ≥ 0 when `ray`) inside rect {minX, minY, maxX, maxY} → [t0, t1], or null (Liang–Barsky).
+ * Screen or world: the caller picks the space.
+ */
+export function clipInfinite(p, d, rect, ray = false) {
+  let t0 = ray ? 0 : -Infinity, t1 = Infinity;
+  for (const [q, lo, hi, v] of [[d.x, rect.minX, rect.maxX, p.x], [d.y, rect.minY, rect.maxY, p.y]]) {
+    if (Math.abs(q) < 1e-15) { if (v < lo || v > hi) return null; continue; }
+    let a = (lo - v) / q, b = (hi - v) / q;
+    if (a > b) [a, b] = [b, a];
+    t0 = Math.max(t0, a); t1 = Math.min(t1, b);
+    if (t0 > t1) return null;
+  }
+  return Number.isFinite(t0) && Number.isFinite(t1) ? [t0, t1] : null;
+}
+
 /** Primitives of an entity in world coordinates. `blocks` (Map name → {base, entities}) for inserts. */
 export function prims(e, blocks = null, depth = 0) {
   switch (e.type) {
@@ -122,6 +148,10 @@ export function prims(e, blocks = null, depth = 0) {
       const c = viewportCorners(e);
       return c.map((p, i) => ({ k: 'L', x1: p.x, y1: p.y, x2: c[(i + 1) % 4].x, y2: c[(i + 1) % 4].y }));
     }
+    case 'xline': case 'ray': {   // 0.5 DR.6: one long stand-in segment (FAR each way), for intersections, picking and trimming only
+      const s = e.type === 'ray' ? 0 : -FAR;
+      return [{ k: 'L', x1: e.x + e.dx * s, y1: e.y + e.dy * s, x2: e.x + e.dx * FAR, y2: e.y + e.dy * FAR, inf: true }];
+    }
     case 'mleader': {
       // like a dimension: the arrowhead and the text box count for picking, not for snaps
       const out = [];
@@ -139,7 +169,12 @@ export function dimParts(e, blocks) {
 }
 
 /** Model → paper for a viewport: the model point (cx, cy) lands on the viewport's centre, × s. */
-export function viewportMatrix(vp) { return [vp.s, 0, 0, vp.s, vp.x - vp.cx * vp.s, vp.y - vp.cy * vp.s]; }
+/** Model → paper for a viewport: its view centre (cx, cy) lands on its centre (x, y), at scale s, turned by its twist `tw` (radians, DR.8). */
+export function viewportMatrix(vp) {
+  if (!vp.tw) return [vp.s, 0, 0, vp.s, vp.x - vp.cx * vp.s, vp.y - vp.cy * vp.s];
+  const c = Math.cos(vp.tw) * vp.s, n = Math.sin(vp.tw) * vp.s;
+  return [c, n, -n, c, vp.x - (c * vp.cx - n * vp.cy), vp.y - (n * vp.cx + c * vp.cy)];
+}
 
 /** Corners of a viewport (paper units), counter-clockwise from the lower left. */
 export function viewportCorners(e) {
@@ -398,6 +433,7 @@ export function primBounds(p, b = emptyBounds()) {
 
 export function entityBounds(e, blocks) {
   const b = emptyBounds();
+  if (UNBOUNDED.has(e.type)) return b;   // construction lines have no extents (DR.6)
   if (e.type === 'point') { growPt(b, e.x, e.y); return b; }
   for (const p of prims(e, blocks)) primBounds(p, b);
   if (e.type === 'insert' && !validBounds(b)) growPt(b, e.x, e.y);
@@ -433,6 +469,7 @@ function pointInFlat(q, f) {
 
 /** Window (fully inside) or crossing (inside or touching) selection test. */
 export function inWindow(e, w, crossing, blocks) {
+  if (UNBOUNDED.has(e.type)) return crossing && !!clipInfinite({ x: e.x, y: e.y }, { x: e.dx, y: e.dy }, w, e.type === 'ray');   // never inside a window (DR.6)
   const b = entityBounds(e, blocks);
   if (!validBounds(b)) return false;
   const inside = b.minX >= w.minX && b.maxX <= w.maxX && b.minY >= w.minY && b.maxY <= w.maxY;
@@ -462,6 +499,7 @@ export function fenceHits(entities, pts, blocks) {
   const out = [];
   for (const e of entities) {
     if (e.type === 'point') { if (segs.some((s) => distToPrim(s, e) <= 1e-9)) out.push(e.id); continue; }
+    if (UNBOUNDED.has(e.type)) { if (prims(e).some((p) => segs.some((s) => intersect(p, s).length))) out.push(e.id); continue; }
     const b = entityBounds(e, blocks);
     if (!validBounds(b) || b.maxX < fb.minX || b.minX > fb.maxX || b.maxY < fb.minY || b.minY > fb.maxY) continue;
     if (prims(e, blocks).some((p) => segs.some((s) => intersect(p, s).length))) out.push(e.id);
@@ -472,7 +510,48 @@ export function fenceHits(entities, pts, blocks) {
 // ---------------------------------------------------------------------------
 // Object snaps
 
-export const SNAP_KINDS = ['end', 'mid', 'cen', 'quad', 'int', 'perp', 'near', 'node', 'ins'];
+export const SNAP_KINDS = ['end', 'mid', 'cen', 'quad', 'int', 'perp', 'tan', 'near', 'node', 'ins'];
+
+/**
+ * Tangents (0.5 DR.3). tangentFrom(p, c) → the points on circle c ({ cx, cy, r }) where a line from p touches it (none when p
+ * is inside). commonTangents(c1, c2) → [[a, b]…] the lines touching both (outer pair first, then the inner pair).
+ * resolveTangent(t, other) → the touch point of a deferred tangent t ({ c, near }) once the other end is known: a point,
+ * or another deferred tangent (then [a, b]); the candidate nearest each pick wins.
+ */
+export function tangentFrom(p, c) {
+  const dx = p.x - c.cx, dy = p.y - c.cy, d = Math.hypot(dx, dy);
+  if (d < c.r - EPS) return [];
+  if (d <= c.r + EPS) return [{ x: p.x, y: p.y }];
+  const a = Math.atan2(dy, dx), b = Math.acos(c.r / d);
+  return [a + b, a - b].map((t) => ({ x: c.cx + c.r * Math.cos(t), y: c.cy + c.r * Math.sin(t) }));
+}
+export function commonTangents(c1, c2) {
+  const dx = c2.cx - c1.cx, dy = c2.cy - c1.cy, d = Math.hypot(dx, dy);
+  if (d < EPS) return [];
+  const out = [], base = Math.atan2(dy, dx);
+  for (const sgn of [1, -1]) {   // 1: outer (same side), −1: inner (crossing between)
+    const k = (c1.r - sgn * c2.r) / d;
+    if (Math.abs(k) > 1 + 1e-12) continue;
+    const g = Math.acos(Math.max(-1, Math.min(1, k)));
+    for (const t of [base + g, base - g]) {
+      const n = { x: Math.cos(t), y: Math.sin(t) };
+      out.push([{ x: c1.cx + c1.r * n.x, y: c1.cy + c1.r * n.y }, { x: c2.cx + sgn * c2.r * n.x, y: c2.cy + sgn * c2.r * n.y }]);
+    }
+  }
+  return out;
+}
+export function resolveTangent(t, other) {
+  if (other && other.tan) {
+    const pairs = commonTangents(t.c, other.tan.c);
+    if (!pairs.length) return null;
+    let best = null, bd = Infinity;
+    for (const [a, b] of pairs) { const sc = dist(a, t.near) + dist(b, other.tan.near); if (sc < bd) { bd = sc; best = [a, b]; } }
+    return best;
+  }
+  const cands = tangentFrom(other, t.c);
+  if (!cands.length) return null;
+  return cands.reduce((m, q) => (dist(q, t.near) < dist(m, t.near) ? q : m));
+}
 
 /** Snap candidates of one entity near q (within r world units). */
 export function snapPoints(e, q, r, kinds, blocks, base) {
@@ -481,6 +560,12 @@ export function snapPoints(e, q, r, kinds, blocks, base) {
   if (e.type === 'point') { add('node', e); return out; }
   if (e.type === 'text') { add('ins', e); return out; }
   if (e.type === 'insert') add('ins', e);
+  if (UNBOUNDED.has(e.type)) {   // no end or mid: only nearest and perpendicular here (intersections come from view.snap)
+    const p = prims(e)[0];
+    if (base && kinds.has('perp')) { const t = primParam(p, base, false); if (t >= 0 && t <= 1) add('perp', primPoint(p, t)); }
+    if (kinds.has('near')) { const n = primPoint(p, primParam(p, q)); if (dist(n, q) <= r) out.push({ kind: 'near', x: n.x, y: n.y }); }
+    return out;
+  }
   const ps = prims(e, blocks);
   for (const p of ps) {
     if (p.box) continue;
@@ -495,6 +580,14 @@ export function snapPoints(e, q, r, kinds, blocks, base) {
     if (base && kinds.has('perp')) {
       if (p.k === 'L') { const t = primParam(p, base, false); if (t >= 0 && t <= 1) add('perp', primPoint(p, t)); }
       else { const a = Math.atan2(base.y - p.cy, base.x - p.cx); if (onSweep(a, p.a0, p.a1)) add('perp', { x: p.cx + p.r * Math.cos(a), y: p.cy + p.r * Math.sin(a) }); }
+    }
+    if (kinds.has('tan') && p.k === 'A') {   // DR.3: from the base point, the touch points on the arc; no base yet: deferred
+      const c = { cx: p.cx, cy: p.cy, r: p.r };
+      if (base) { for (const q of tangentFrom(base, c)) if (onSweep(Math.atan2(q.y - p.cy, q.x - p.cx), p.a0, p.a1)) add('tan', q); }
+      else {
+        const a = Math.atan2(q.y - p.cy, q.x - p.cx), n = { x: p.cx + p.r * Math.cos(a), y: p.cy + p.r * Math.sin(a) };
+        if (onSweep(a, p.a0, p.a1) && Math.abs(Math.hypot(q.x - p.cx, q.y - p.cy) - p.r) <= r) out.push({ kind: 'tan', x: n.x, y: n.y, defer: c });
+      }
     }
     if (kinds.has('near')) { const n = primPoint(p, primParam(p, q)); if (dist(n, q) <= r) out.push({ kind: 'near', x: n.x, y: n.y }); }
   }
@@ -556,6 +649,10 @@ export function txEntity(e, m) {
       const c = P(e.x, e.y);
       return { ...e, x: c.x, y: c.y, w: e.w * sim.s, h: e.h * sim.s, s: e.s * sim.s };
     }
+    case 'xline': case 'ray': {
+      const a = P(e.x, e.y), u = unitDir(m[0] * e.dx + m[2] * e.dy, m[1] * e.dx + m[3] * e.dy) || { dx: e.dx, dy: e.dy };
+      return { ...e, x: a.x, y: a.y, dx: u.dx, dy: u.dy };
+    }
     case 'mleader': {
       const pts = e.pts.map((p) => P(p.x, p.y)), last = e.pts[e.pts.length - 1];
       // the landing keeps pointing the way it pointed (a mirror can turn it round); the text stays level
@@ -579,7 +676,7 @@ export function grips(e) {
     case 'arc': return [{ x: e.cx, y: e.cy, key: 'c' }, { ...polar({ x: e.cx, y: e.cy }, e.a0, e.r), key: 'a0' }, { ...polar({ x: e.cx, y: e.cy }, e.a1, e.r), key: 'a1' }];
     case 'poly': return e.pts.map((p, i) => ({ x: p.x, y: p.y, key: 'v' + i }));
     case 'ellipse': return [{ x: e.cx, y: e.cy, key: 'c' }];
-    case 'text': case 'point': case 'insert': return [{ x: e.x, y: e.y, key: 'p' }];
+    case 'text': case 'point': case 'insert': case 'xline': case 'ray': return [{ x: e.x, y: e.y, key: 'p' }];
     case 'dim': return ['p1', 'p2', 'c', 'loc'].filter((k) => e[k] && !(k === 'p2' && (e.kind === 'radius' || e.kind === 'diameter'))).map((k) => ({ x: e[k].x, y: e[k].y, key: k }));
     case 'viewport': return [{ x: e.x, y: e.y, key: 'c' }, ...viewportCorners(e).map((p, i) => ({ ...p, key: 'k' + i }))];
     case 'mleader': return e.pts.map((p, i) => ({ x: p.x, y: p.y, key: 'v' + i }));
@@ -600,7 +697,7 @@ export function gripMove(e, key, to) {
       return { ...e, [key]: normAngle(Math.atan2(to.y - e.cy, to.x - e.cx)) };
     case 'poly': { const i = +key.slice(1); return { ...e, pts: e.pts.map((p, j) => (j === i ? { ...p, x: to.x, y: to.y } : p)) }; }
     case 'ellipse': return { ...e, cx: to.x, cy: to.y };
-    case 'text': case 'point': case 'insert': return { ...e, x: to.x, y: to.y };
+    case 'text': case 'point': case 'insert': case 'xline': case 'ray': return { ...e, x: to.x, y: to.y };
     case 'dim': {
       const out = { ...e };
       delete out.block;
@@ -622,7 +719,8 @@ export function gripMove(e, key, to) {
       const k = +key.slice(1), c = viewportCorners(e), o = c[(k + 2) % 4];
       const w = Math.max(Math.abs(to.x - o.x), EPS), h = Math.max(Math.abs(to.y - o.y), EPS);
       const x = (to.x + o.x) / 2, y = (to.y + o.y) / 2;
-      return { ...e, x, y, w, h, cx: e.cx + (x - e.x) / e.s, cy: e.cy + (y - e.y) / e.s };
+      const tc = Math.cos(-(e.tw || 0)), tn = Math.sin(-(e.tw || 0)), dx = (x - e.x) / e.s, dy = (y - e.y) / e.s;   // the move on paper, back into a twisted view
+      return { ...e, x, y, w, h, cx: e.cx + tc * dx - tn * dy, cy: e.cy + tn * dx + tc * dy };
     }
     default: return e;
   }
@@ -646,6 +744,11 @@ export function offsetEntity(e, d, side) {
       return r > EPS ? { ...e, r } : null;
     }
     case 'poly': return offsetPoly(e, d, side);
+    case 'xline': case 'ray': {
+      let nx = -e.dy, ny = e.dx;
+      if ((side.x - e.x) * nx + (side.y - e.y) * ny < 0) { nx = -nx; ny = -ny; }
+      return { ...e, x: e.x + nx * d, y: e.y + ny * d };
+    }
     default: return null;
   }
 }
@@ -703,6 +806,10 @@ function entityParams(e, cutters, blocks, edgeExtend = false) {
       ts.push((e.type === 'poly' ? i : 0) + t);
     }
   });
+  if (UNBOUNDED.has(e.type)) {   // a stand-in segment 2·FAR long: rounding t would move a cut by metres; keep it exact
+    const u = ts.sort((a, b) => a - b).filter((t, i, l) => !i || t - l[i - 1] > 1e-15);
+    return { own, ts: u };
+  }
   return { own, ts: [...new Set(ts.map((t) => Math.round(t * 1e9) / 1e9))].sort((a, b) => a - b) };
 }
 
@@ -714,7 +821,7 @@ function pickParam(e, own, q) {
 
 /** Trim e at the cutting edges around the picked point: returns the pieces that stay ([] = all gone, null = nothing to cut). */
 export function trimEntity(e, cutters, pick, blocks) {
-  if (!['line', 'arc', 'circle', 'poly'].includes(e.type)) return null;
+  if (!['line', 'arc', 'circle', 'poly', 'xline', 'ray'].includes(e.type)) return null;
   const { own, ts } = entityParams(e, cutters.filter((c) => c !== e), blocks);
   const tp = pickParam(e, own, pick);
   if (e.type === 'circle') {
@@ -726,14 +833,15 @@ export function trimEntity(e, cutters, pick, blocks) {
     return [{ ...e, type: 'arc', a0: normAngle(hi), a1: normAngle(lo) }];
   }
   const maxT = e.type === 'poly' ? (e.closed ? e.pts.length : e.pts.length - 1) : 1;
-  const inner = ts.filter((t) => t > 1e-9 && t < maxT - 1e-9);
+  const tiny = UNBOUNDED.has(e.type) ? 1e-15 : 1e-9;   // t along a construction line's 2·FAR stand-in
+  const inner = ts.filter((t) => t > tiny && t < maxT - tiny);
   if (e.type === 'poly' && e.closed) return trimClosedPoly(e, ts, tp);
   if (!inner.length) return null;
   let lo = 0, hi = maxT;
   for (const t of inner) { if (t < tp) lo = t; else if (t > tp) { hi = t; break; } }
   const keep = [];
-  if (lo > 1e-9) keep.push(subEntity(e, 0, lo));
-  if (hi < maxT - 1e-9) keep.push(subEntity(e, hi, maxT));
+  if (lo > tiny) keep.push(subEntity(e, 0, lo));
+  if (hi < maxT - tiny) keep.push(subEntity(e, hi, maxT));
   return keep.filter(Boolean);
 }
 
@@ -750,7 +858,18 @@ function trimClosedPoly(e, ts, tp) {
 
 /** The piece of a line / arc / open poly between parameters t0 < t1. */
 export function subEntity(e, t0, t1) {
-  if (t1 - t0 < 1e-9) return null;
+  if (t1 - t0 < (UNBOUNDED.has(e.type) ? 1e-15 : 1e-9)) return null;
+  if (UNBOUNDED.has(e.type)) {
+    // along prims' stand-in segment: an end at 0 (xline) or 1 is still infinite; a cut end is a real point
+    const p = prims(e)[0], at = (t) => primPoint(p, t);
+    const open0 = e.type === 'xline' && t0 <= 1e-12, open1 = t1 >= 1 - 1e-12;
+    if (open0 && open1) return { ...e };
+    if (open1) { const a = at(t0); return { ...e, type: 'ray', x: a.x, y: a.y }; }
+    if (open0) { const b = at(t1); return { ...e, type: 'ray', x: b.x, y: b.y, dx: -e.dx, dy: -e.dy }; }
+    const a = at(t0), b = at(t1), out = { ...e, type: 'line', x1: a.x, y1: a.y, x2: b.x, y2: b.y };
+    delete out.x; delete out.y; delete out.dx; delete out.dy;
+    return out;
+  }
   if (e.type === 'line') {
     const p = { x: e.x1 + (e.x2 - e.x1) * t0, y: e.y1 + (e.y2 - e.y1) * t0 }, q = { x: e.x1 + (e.x2 - e.x1) * t1, y: e.y1 + (e.y2 - e.y1) * t1 };
     return { ...e, x1: p.x, y1: p.y, x2: q.x, y2: q.y };
@@ -785,7 +904,7 @@ export function subEntity(e, t0, t1) {
  * (AutoCAD's Quick mode then erases it). `edgeExtend`: cutting lines and arcs extended (EDGEMODE 1).
  */
 export function trimSplit(e, cutters, blocks, { edgeExtend = false } = {}) {
-  if (!e || !['line', 'arc', 'circle', 'poly'].includes(e.type)) return null;
+  if (!e || !['line', 'arc', 'circle', 'poly', 'xline', 'ray'].includes(e.type)) return null;
   if (e.type === 'poly' && e.pts.length < 2) return null;
   const { own, ts } = entityParams(e, cutters.filter((c) => c !== e && (c.id === undefined || c.id !== e.id)), blocks, edgeExtend);
   const closed = e.type === 'circle' || (e.type === 'poly' && !!e.closed);
@@ -799,9 +918,10 @@ export function trimSplit(e, cutters, blocks, { edgeExtend = false } = {}) {
       pieces.push({ t0: cuts[cuts.length - 1], t1: cuts[0] + maxT });
     }
   } else {
-    const inner = ts.filter((t) => t > 1e-9 && t < maxT - 1e-9);
+    const tiny = UNBOUNDED.has(e.type) ? 1e-15 : 1e-9;   // t along a construction line's 2·FAR stand-in
+    const inner = ts.filter((t) => t > tiny && t < maxT - tiny);
     const at = [0, ...inner, maxT];
-    for (let i = 0; i + 1 < at.length; i++) if (at[i + 1] - at[i] > 1e-9) pieces.push({ t0: at[i], t1: at[i + 1] });
+    for (let i = 0; i + 1 < at.length; i++) if (at[i + 1] - at[i] > tiny) pieces.push({ t0: at[i], t1: at[i + 1] });
   }
   return { e, own, pieces, maxT, closed };
 }
@@ -1059,7 +1179,7 @@ export function breakEntity(e, p1, p2) {
     const a1 = Math.atan2(p1.y - e.cy, p1.x - e.cx), a2 = Math.atan2(p2.y - e.cy, p2.x - e.cx);
     return [{ ...e, type: 'arc', a0: normAngle(a2), a1: normAngle(a1) }];
   }
-  if (!['line', 'arc', 'poly'].includes(e.type)) return { error: 'type' };
+  if (!['line', 'arc', 'poly', 'xline', 'ray'].includes(e.type)) return { error: 'type' };
   let t1 = paramOn(e, p1), t2 = same ? t1 : paramOn(e, p2);
   if (e.type === 'poly' && e.closed) {
     const n = e.pts.length;
@@ -1070,9 +1190,10 @@ export function breakEntity(e, p1, p2) {
   }
   if (t2 < t1) [t1, t2] = [t2, t1];
   const maxT = e.type === 'poly' ? e.pts.length - 1 : 1;
+  const tiny = UNBOUNDED.has(e.type) ? 1e-15 : 1e-9;
   const out = [];
-  if (t1 > 1e-9) out.push(subEntity(e, 0, t1));
-  if (t2 < maxT - 1e-9) out.push(subEntity(e, t2, maxT));
+  if (t1 > tiny || e.type === 'xline') out.push(subEntity(e, 0, t1));
+  if (t2 < maxT - tiny) out.push(subEntity(e, t2, maxT));
   return out.filter(Boolean);
 }
 
@@ -1245,6 +1366,7 @@ function keepSagitta(b, c0, c1) {
 export function stretchEntity(e, inside, dx, dy) {
   const mv = (p) => ({ x: p.x + dx, y: p.y + dy });
   switch (e.type) {
+    case 'xline': case 'ray': return inside(e) ? { ...e, ...mv(e) } : null;   // its point in the window: the whole line moves (DR.6)
     case 'line': {
       const a = inside({ x: e.x1, y: e.y1 }), b = inside({ x: e.x2, y: e.y2 });
       if (!a && !b) return null;

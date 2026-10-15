@@ -43,7 +43,6 @@ $__tools = [
         ['TEXT', 'type', Lang::t('ui.text'), Lang::t('toolbar.text.title')],
         ['MTEXT', 'text-paragraph', Lang::t('toolbar.mtext'), Lang::t('toolbar.mtext.title')],
         ['HATCH', 'grid-3x3', Lang::t('toolbar.hatch'), Lang::t('toolbar.hatch.title')],
-        ['POINT', 'dot', Lang::t('ui.point'), Lang::t('ui.point_po')],
     ],
     'Modify' => [   // i18n-ignore: group id (label toolbar.group.modify; data-tb-key keeps arranged toolbars)
         ['MOVE', 'arrows-move', Lang::t('ui.move'), Lang::t('ui.move.title')],
@@ -97,6 +96,13 @@ $__tools = [
 ];
 // Less-used tools of a group, in its "More" menu: [command, label, alias shown as the key]
 $__more = [
+    'Draw' => [   // i18n-ignore (the group's key in $__tools, not shown); Point moved here for XLINE / RAY (0.5 DR.6): two rows at 1440 px
+        ['POINT', Lang::t('toolbar.point'), 'PO'],
+        ['CIRCLE T', Lang::t('toolbar.circle.ttr'), 'C T'],   // 0.5 DR.1
+        ['CIRCLE TTT', Lang::t('toolbar.circle.ttt'), 'C TTT'],   // 0.5 DR.2
+        ['XLINE', Lang::t('toolbar.xline'), 'XL'],
+        ['RAY', Lang::t('toolbar.ray'), 'RAY'],
+    ],
     'Annotate' => [   // i18n-ignore (the group's key in $__tools, not shown)
         ['DIMCONTINUE', Lang::t('toolbar.dimcontinue'), 'DCO'],
         ['DIMBASELINE', Lang::t('toolbar.dimbaseline'), 'DBA'],
@@ -118,11 +124,20 @@ $__more = [
         ['SPLIT 2H', Lang::t('toolbar.split.2h'), 'SPLIT'],
         ['SPLIT 4', Lang::t('toolbar.split.4'), 'SPLIT'],
         ['SPLIT SI', Lang::t('toolbar.split.1'), 'SPLIT'],
+        // a turned view (0.5 DR.8): UCS Z ∓90, which turns the view with it (as UCSFOLLOW 1); nothing in the drawing moves
+        ['TURNLEFT', Lang::t('toolbar.turn.left'), 'TURNLEFT'],
+        ['TURNRIGHT', Lang::t('toolbar.turn.right'), 'TURNRIGHT'],
+        ['TURNWORLD', Lang::t('toolbar.turn.world'), 'TURNWORLD'],
+        ['COMPARESETTINGS', Lang::t('toolbar.compare'), 'CMPSET'],   // 0.5 WL.12
+        ['MAPLAYERS', Lang::t('toolbar.maplayers'), 'ML'],   // 0.5 SG.3
+        ['POINTCLOUDATTACH', Lang::t('toolbar.pcattach'), 'PCATTACH'],   // 0.5 SG.1
+        ['POINTCLOUD', Lang::t('toolbar.pointcloud'), 'PC'],
         ['LINKVIEWS', Lang::t('toolbar.linkviews'), 'LINKVIEWS'],
         ...($__3dUrl ? [['OPENIN3D', Lang::t('toolbar.open3d', ['app' => $__3dApp['name']]), 'OPENIN3D']] : []),
         // customizing (session cad-lisp): here, since a File "More" would push the toolbar to three rows at 1440 px
         ['APPLOAD', Lang::t('toolbar.appload'), 'AP'],
         ['ALIASEDIT', Lang::t('toolbar.aliasedit'), 'ALIASEDIT'],
+        ['SHORTCUTS', Lang::t('toolbar.shortcuts'), 'KEYS'],   // 0.5 WL.18
     ],
     'Modify' => [   // i18n-ignore (the group's key in $__tools, not shown)
         ['ARRAY', Lang::t('toolbar.array'), 'AR'],
@@ -211,7 +226,7 @@ $__more = [
         </div>
       </div>
     <?php endforeach; ?>
-    <input type="file" class="visually-hidden" accept=".dwg,.dxf,.json,.ccsheets,.pln,.pla,.tpl,.bpn" tabindex="-1" aria-hidden="true" data-file>
+    <input type="file" class="visually-hidden" accept=".dwg,.dxf,.json,.ccsheets,.pln,.pla,.tpl,.bpn,.las,.laz,.xyz,.pts" tabindex="-1" aria-hidden="true" data-file>
   </div>
 
   <?php
@@ -311,6 +326,7 @@ $__more = [
         <input type="text" id="cc-layer-name" class="cc-input" maxlength="255" placeholder="<?= Lang::e('ui.layer_name') ?>" autocomplete="off" data-layer-name>
         <button type="submit" class="btn-plot btn-sm-cc"><?= Lang::e('ui.add') ?></button>
       </form>
+      <p class="cc-note cc-vpfrz-note" data-vpfrz-note hidden><?= Lang::e('vp.frz.note') ?></p>
       <ul class="cc-layers" data-layer-list></ul>
       <p class="cc-note"><?= Lang::e('ui.filled_dot_current_layer') ?></p>
     </section>
@@ -329,7 +345,7 @@ $__more = [
           <details class="cc-menu" data-sheetset-menu>
             <summary class="cc-linkbtn" title="<?= Lang::e('sheetset.menu.title') ?>"><?= Lang::e('sheetset.menu') ?></summary>
             <div class="cc-menu-list" role="menu" aria-label="<?= Lang::e('sheetset.menu.title') ?>">
-              <?php foreach ([['open', 'sheetset.m.open'], ['new', 'sheetset.m.new'], null, ['add', 'sheetset.m.add'], ['newsheet', 'sheetset.m.newsheet'], ['subset', 'sheetset.m.subset'], ['rename', 'sheetset.m.rename'], ['remove', 'sheetset.m.remove'], ['renumber', 'sheetset.m.renumber'], ['props', 'sheetset.m.props'], null, ['publish', 'sheetset.m.publish'], ['update', 'sheetset.m.update'], ['list', 'sheetset.m.list'], ['archive', 'sheetset.m.archive'], null, ['undo', 'sheetset.m.undo'], ['redo', 'sheetset.m.redo'], ['download', 'sheetset.m.download'], ['close', 'sheetset.m.close']] as $__ss): ?>
+              <?php foreach ([['open', 'sheetset.m.open'], ['new', 'sheetset.m.new'], null, ['add', 'sheetset.m.add'], ['newsheet', 'sheetset.m.newsheet'], ['subset', 'sheetset.m.subset'], ['rename', 'sheetset.m.rename'], ['remove', 'sheetset.m.remove'], ['renumber', 'sheetset.m.renumber'], ['numbering', 'sheetset.m.numbering'], ['props', 'sheetset.m.props'], null, ['publish', 'sheetset.m.publish'], ['update', 'sheetset.m.update'], ['list', 'sheetset.m.list'], ['archive', 'sheetset.m.archive'], null, ['undo', 'sheetset.m.undo'], ['redo', 'sheetset.m.redo'], ['download', 'sheetset.m.download'], ['close', 'sheetset.m.close']] as $__ss): ?>
                 <?php if (!$__ss): ?><hr><?php continue; endif; ?>
                 <button type="button" role="menuitem" data-ss="<?= e($__ss[0]) ?>"><?= Lang::e($__ss[1]) ?></button>
               <?php endforeach; ?>
@@ -431,6 +447,13 @@ $__more = [
             </select>
             <label for="cc-plot-pen"><?= Lang::e('ui.line_weight') ?></label>
             <select id="cc-plot-pen" class="cc-select" data-plot-pen></select>
+            <label for="cc-plot-dpi"><?= Lang::e('ui.plot.pictures') ?></label>
+            <select id="cc-plot-dpi" class="cc-select" data-plot-dpi>
+              <option value="0"><?= Lang::e('ui.plot.pictures.own') ?></option>
+              <option value="600"><?= Lang::e('ui.plot.dpi', ['n' => 600]) ?></option>
+              <option value="300"><?= Lang::e('ui.plot.dpi', ['n' => 300]) ?></option>
+              <option value="150"><?= Lang::e('ui.plot.dpi', ['n' => 150]) ?></option>
+            </select>
           </div>
           <p class="cc-note" data-plot-info></p>
         </div>

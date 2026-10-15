@@ -19,7 +19,6 @@ keywords: problem, error, not working, message, cannot open, unknown command, no
 | The offline button says "Offline not available" | Private windows and some managed computers cannot keep an offline copy. | Use a normal window, or stay online. |
 | CadCraft does not open with no connection | It was not saved for offline use in this browser, or the browser cleared it. | Next time you are online, click {{ui:Save for offline}} and wait for "Offline ready". |
 | The drawing opens but parts are missing | Objects CadCraft cannot draw yet, or layers that are off or frozen in the file. | Read "About this file" in the left panel. Check the {{ui:Layers}} panel. |
-| A viewport shows the model turned differently from the original | Twisted viewports are shown square to the sheet. | Not built yet. |
 | Text wraps onto two lines | CadCraft draws text in a Helvetica-style font, wider than some CAD fonts. | Shorten the text in Properties, or live with the extra line. |
 
 ## The command line

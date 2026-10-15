@@ -10,6 +10,10 @@
  *   lasso      press and drag on an empty spot: a freehand lasso (default; lasso.js) / a rectangle — LASSOMODE 1 / 0
  *   corner     corner indicator: automatic (default: the axis icon on the Model tab, the view cube on the 3D tab) /
  *              axis icon (the X/Y icon on the Model tab, an X/Y/Z triad on the 3D tab) / view cube (m3d/viewcube.js: at Top on the Model tab, where a click opens the 3D tab looking from there) / none
+ *   tabs       sheet tabs: full names (default) / sheet numbers only (WL.9; the number from the open sheet set, else the
+ *              name's first word when it reads like one; the tooltip keeps the whole name)
+ *   My tools   buttons of your own (mytools-ui.js; localStorage cadcraft.mytools): list, add / edit / delete, export and
+ *              import JSON, import a CUIx file
  */
 ?>
 <fieldset class="shell-set" data-cc-settings>
@@ -55,5 +59,15 @@
   </div>
   <p class="shell-hint-text"><?= Lang::e('set.automatic_shows_axis_icon') ?></p>
 </fieldset>
+<fieldset class="shell-set">
+  <legend><?= Lang::e('set.tabs') ?></legend>
+  <div class="shell-seg cc-set-seg2" role="radiogroup" aria-label="<?= Lang::e('set.tabs') ?>">
+    <label><input type="radio" name="ccTabs" value="full"> <i class="bi bi-card-text" aria-hidden="true"></i> <?= Lang::e('set.tabs.full') ?></label>
+    <label><input type="radio" name="ccTabs" value="number"> <i class="bi bi-123" aria-hidden="true"></i> <?= Lang::e('set.tabs.number') ?></label>
+  </div>
+  <p class="shell-hint-text"><?= Lang::e('set.tabs.hint') ?></p>
+</fieldset>
+<?php /* My tools (0.5 DR.9): mytools-ui.js fills this — buttons of your own, their keys, JSON and CUIx import */ ?>
+<fieldset class="shell-set" data-mytools-settings><legend><?= Lang::e('mytools.legend') ?></legend></fieldset>
 <?php /* AI assistants and scripts (0.4 part 2 X.6, session agents): host.js fills this with Settings › Assistants (off by default) */ ?>
 <div data-assistants-settings></div>

@@ -92,7 +92,7 @@ try {
   await page.waitForTimeout(200);
   ok(await page.evaluate(() => !document.querySelector('[data-addon-group="electrical:electrical"]')), 'and off again');
   const help = await page.evaluate(async () => { await window.cadcraftHelp?.load?.(); return (window.cadcraftHelp?.topics?.() || []).filter((t) => t.scope === 'addon:electrical').map((t) => t.slug); });
-  ok(help.length === 8 && help.includes('electrical-start'), 'its help is in the help panel', JSON.stringify(help));
+  ok(help.length === 9 && help.includes('electrical-start') && help.includes('electrical-import-symbols'), 'its help is in the help panel', JSON.stringify(help));
 
   console.log('\n== a schematic from the command line');
   await typeCmd('ELSHEET'); await typeCmd('A3'); await typeCmd('Control');

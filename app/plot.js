@@ -9,15 +9,16 @@
  *   await toPdf(list, { pen, title })             → { bytes: Uint8Array, report }
  *   drawPreview(ctx, list, { pxPerMm, pen })      the same on a canvas
  *
- * A sheet is { w, h (mm), views: [{ clip: [{x,y}…] | null, m: entity → mm, entities }] }.
+ * A sheet is { w, h (mm), views: [{ clip: [{x,y}…] | null, m: entity → mm, entities, frozen? (layer names, VP.1) }] }.
  * Lines are true vectors (arcs as Béziers), fills keep their holes (even-odd), text is
  * Helvetica (one of the 14 fonts every PDF reader has), so nothing is embedded. Helvetica's
  * Windows-1252 set covers Western European text; other characters print as "?" and the
  * report says how many. Layers set not to plot are left out; viewport frames follow their layer.
  */
 
-import { walk } from './walk.js';
-import { textLayout, textCorners, viewportCorners, viewportMatrix, mMul, mApply, FONT_EM, emptyBounds, growPt, validBounds, primBounds } from './geom.js';
+import { walk, frozenSet } from './walk.js';
+import { findPicture, pdfImage } from './pictures.js';
+import { textLayout, textCorners, viewportCorners, viewportMatrix, mMul, mApply, FONT_EM, emptyBounds, growPt, validBounds, primBounds, clipInfinite } from './geom.js';
 import { UNIT_MM, makePaper, sOf, nOf, scaleLabel } from './sheets.js';
 import { CP1252, SUBST, charAdvance } from './font.js';
 
@@ -32,8 +33,9 @@ export function layoutSheet(doc, layout) {
   const toMm = [k, 0, 0, k, -p.x0 * k, -p.y0 * k];
   const views = [];
   for (const e of layout.entities.values()) {
-    if (e.type !== 'viewport') continue;
-    views.push({ clip: viewportCorners(e).map((q) => mApply(toMm, q)), m: mMul(toMm, viewportMatrix(e)), entities: doc.model.values() });
+    if (e.type !== 'viewport' || e.on === false) continue;   // a viewport turned off plots its frame only (P.7)
+    // the layers frozen in this viewport are left out of its view (VP.1)
+    views.push({ clip: viewportCorners(e).map((q) => mApply(toMm, q)), m: mMul(toMm, viewportMatrix(e)), entities: doc.model.values(), frozen: frozenSet(e) });
   }
   views.push({ clip: null, m: toMm, entities: layout.entities.values() });
   return { w: p.w * k, h: p.h * k, views, name: layout.name };
@@ -63,8 +65,12 @@ export function modelSheet(doc, { area, paper = 'iso-a3', portrait = false, n = 
 
 export function displayList(doc, sheet, { mono = true } = {}) {
   const ink = (c) => (mono || c === 'ink' ? '#000000' : c);
+  const files = new Map();   // picture file → its stored record (pictures.js)
   const views = sheet.views.map((v) => {
-    const fills = [], strokes = new Map(), points = [], texts = [];
+    const fills = [], strokes = new Map(), points = [], texts = [], pictures = [], masks = [];
+    // construction lines (0.5 DR.7) are clipped to what this view prints: its clip, else the sheet (none on an empty sheet)
+    const area = v.clip ? v.clip.reduce((b, q) => ({ minX: Math.min(b.minX, q.x), minY: Math.min(b.minY, q.y), maxX: Math.max(b.maxX, q.x), maxY: Math.max(b.maxY, q.y) }), { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity })
+      : sheet.w > 0 && sheet.h > 0 ? { minX: 0, minY: 0, maxX: sheet.w, maxY: sheet.h } : null;
     // walk.js's 4th argument (track P): alpha = transparency, wipe = a fill in the paper's colour (white)
     const alphaOf = (o) => (o && Number.isFinite(o.alpha) ? Math.max(0, Math.min(1, o.alpha)) : 1);
     const strokeList = (color, lw, a) => { const k = color + '|' + (lw >= 0 ? lw : -3) + '|' + a; let l = strokes.get(k); if (!l) strokes.set(k, (l = [])); return l; };
@@ -81,11 +87,18 @@ export function displayList(doc, sheet, { mono = true } = {}) {
         }
       },
       text(color, e, o) { texts.push({ color: ink(color), e, alpha: alphaOf(o) }); },
+      // a text's background mask (0.5 WL.8): the paper's white, or its own colour on a colour plot
+      mask(color, loop, o) { masks.push({ color: o?.wipe || mono ? '#ffffff' : ink(color), loop }); },
       point(color, x, y) { points.push({ color: ink(color), x, y }); },
-    }, { m: v.m, plot: true });
-    return { clip: v.clip, fills, strokes: [...strokes].map(([k, prims]) => { const [color, lw, a] = k.split('|'); return { color, lw: +lw, alpha: +a, prims }; }), points, texts };
+      infinite(color, e, lw = -3, o) {
+        const tt = area && clipInfinite({ x: e.x, y: e.y }, { x: e.dx, y: e.dy }, area, e.type === 'ray');
+        if (tt && tt[1] > tt[0]) strokeList(ink(color), lw, alphaOf(o)).push({ k: 'L', x1: e.x + e.dx * tt[0], y1: e.y + e.dy * tt[0], x2: e.x + e.dx * tt[1], y2: e.y + e.dy * tt[1] });
+      },
+      picture(p) { const rec = findPicture(doc, p.file); if (rec) { pictures.push(p); files.set(p.file, rec); } },   // 0.5 WL.13/14: only pictures whose file CadCraft has
+    }, { m: v.m, plot: true, frozen: v.frozen || null });
+    return { clip: v.clip, pictures, fills, masks, strokes: [...strokes].map(([k, prims]) => { const [color, lw, a] = k.split('|'); return { color, lw: +lw, alpha: +a, prims }; }), points, texts };
   });
-  return { w: sheet.w, h: sheet.h, name: sheet.name, views };
+  return { w: sheet.w, h: sheet.h, name: sheet.name, views, ...(files.size ? { pictureFiles: files } : {}) };
 }
 
 // ---------------------------------------------------------------------------
@@ -95,33 +108,60 @@ export function displayList(doc, sheet, { mono = true } = {}) {
 /** A stroke's width on paper (mm): its lineweight, 0 as the thinnest line (0.05 mm), the default as the plot's pen. */
 const penFor = (lw, pen) => (lw >= 0 ? Math.max(lw, 0.05) : pen);
 
-export async function toPdf(list, { pen = 0.25, title = list.name } = {}) {
-  const page = await pageOf(list, pen);
-  const bytes = assemble([page], title);
-  return { bytes, report: { missing: page.missing, texts: page.texts, size: bytes.length, compressed: page.flate } };
+export async function toPdf(list, { pen = 0.25, title = list.name, maxDpi = 0 } = {}) {
+  const images = [];
+  const page = await pageOf(list, pen, { images, maxDpi });
+  const bytes = assemble([page], title, images);
+  return { bytes, report: { missing: page.missing, texts: page.texts, size: bytes.length, compressed: page.flate, pictures: page.pictures, shrunk: page.shrunk, kept: page.kept } };
 }
 
 /**
  * Several sheets in one PDF (0.4 C36, PUBLISH): one page each, at its own paper size, with a bookmark per page.
  * lists = displayList(...) results; names = the bookmarks. → { bytes, report: { pages, missing, texts, size } }
  */
-export async function toPdfPages(lists, { pen = 0.25, title = 'Drawing', names = [] } = {}) {
-  const pages = [];
-  for (const l of lists) pages.push(await pageOf(l, pen));
+export async function toPdfPages(lists, { pen = 0.25, title = 'Drawing', names = [], maxDpi = 0 } = {}) {
+  const pages = [], images = [];
+  for (const l of lists) pages.push(await pageOf(l, pen, { images, maxDpi }));
   pages.forEach((p, i) => { p.name = names[i] || lists[i].name || 'Page ' + (i + 1); });
-  const bytes = assemble(pages, title);
+  const bytes = assemble(pages, title, images);
   return { bytes, report: { pages: pages.length, missing: pages.reduce((s, p) => s + p.missing, 0), texts: pages.reduce((s, p) => s + p.texts, 0), size: bytes.length } };
 }
 
-/** One page's content stream (compressed when the browser can) from a display list. */
-async function pageOf(list, pen) {
+/**
+ * One page's content stream (compressed when the browser can) from a display list. Pictures (0.5 WL.13) go in as image
+ * XObjects at their own resolution (`maxDpi` > 0: a cap on paper), under the page's linework, clipped to their frames;
+ * `images` collects them for the whole file (a picture used on several pages is stored once).
+ */
+async function pageOf(list, pen, { images = [], maxDpi = 0 } = {}) {
   const out = new Ops();
-  let missing = 0, nTexts = 0;
+  let missing = 0, nTexts = 0, nPics = 0, shrunk = 0, kept = 0;
+  const xobjects = new Map();   // image index → /Im<n>
   out.raw((72 / 25.4).toFixed(9) + ' 0 0 ' + (72 / 25.4).toFixed(9) + ' 0 0 cm');   // everything after this is in mm
   for (const v of list.views) {
     out.raw('q');
     out.reset();
     if (v.clip) { out.poly(v.clip); out.raw('W n'); }
+    for (const p of v.pictures || []) {
+      const q = p.place, mmW = Math.hypot(q.ux, q.uy) * q.w, mmH = Math.hypot(q.vx, q.vy) * q.h;
+      const rec = list.pictureFiles?.get(p.file);
+      const key = rec ? rec : null;
+      let k = images.findIndex((im) => im.rec === key && im.maxDpi === maxDpi);
+      if (k < 0) {
+        const img = await pdfImage(rec, { maxDpi, mmW, mmH });
+        if (!img) continue;
+        if (img.shrunk) shrunk++;
+        if (img.kept) kept++;
+        k = images.push({ ...img, rec: key, maxDpi }) - 1;
+      }
+      if (!xobjects.has(k)) xobjects.set(k, '/Im' + k);
+      out.raw('q');
+      if (p.clip && p.clip.length >= 6) { out.raw(num(p.clip[0]) + ' ' + num(p.clip[1]) + ' m'); for (let i = 2; i + 1 < p.clip.length; i += 2) out.raw(num(p.clip[i]) + ' ' + num(p.clip[i + 1]) + ' l'); out.raw('h W n'); }
+      out.alpha(p.alpha);
+      out.raw([q.ux * q.w, q.uy * q.w, q.vx * q.h, q.vy * q.h, q.x, q.y].map((x) => (Number.isFinite(x) ? x.toFixed(6) : '0')).join(' ') + ' cm /Im' + k + ' Do');   // i18n-ignore: PDF operators
+      out.raw('Q');
+      out.alpha(1);
+      nPics++;
+    }
     out.raw('1 J 1 j ' + num(pen) + ' w');
     for (const f of v.fills) {
       out.alpha(f.alpha);
@@ -145,13 +185,21 @@ async function pageOf(list, pen) {
     }
     if (width !== pen) out.raw(num(pen) + ' w');
     out.alpha(1);
+    for (const mk of v.masks || []) {   // over the linework, under the text (WL.8)
+      const l = mk.loop;
+      if (l.length < 6) continue;
+      out.fillColor(mk.color);
+      out.raw(num(l[0]) + ' ' + num(l[1]) + ' m');
+      for (let i = 2; i + 1 < l.length; i += 2) out.raw(num(l[i]) + ' ' + num(l[i + 1]) + ' l');
+      out.raw('h f');
+    }
     for (const p of v.points) { out.strokeColor(p.color); out.raw(num(p.x) + ' ' + num(p.y) + ' m ' + num(p.x) + ' ' + num(p.y) + ' l S'); }
     for (const t of v.texts) { out.alpha(t.alpha); missing += out.text(t.e, t.color); nTexts++; }
     out.raw('Q');
   }
   const content = new TextEncoder().encode(out.lines.join('\n') + '\n');
   const packed = await deflate(content);
-  return { w: list.w, h: list.h, content: packed || content, flate: !!packed, missing, texts: nTexts, alphas: out.alphas };
+  return { w: list.w, h: list.h, content: packed || content, flate: !!packed, missing, texts: nTexts, alphas: out.alphas, xobjects: [...xobjects.keys()], pictures: nPics, shrunk, kept };
 }
 
 class Ops {
@@ -258,8 +306,9 @@ async function deflate(bytes) {
   } catch { return null; }
 }
 
-/** pages [{ w, h (mm), content, flate, name? }] → a PDF 1.4 file; with more than one page, a bookmark per page. */
-function assemble(pages, title) {
+/** pages [{ w, h (mm), content, flate, name?, xobjects? }] (+ the images they use) → a PDF 1.4 file; with more than one
+ *  page, a bookmark per page. */
+function assemble(pages, title, images = []) {
   const enc = new TextEncoder();
   const parts = [], offsets = [];
   let size = 0;
@@ -275,6 +324,10 @@ function assemble(pages, title) {
 
   // 1 catalog, 2 pages, 3 font, 4 info, 5 outlines (more than one page), then per page: the page and its content
   const n = pages.length, outlines = n > 1, first = 6, pageNo = (i) => first + 2 * i, itemNo = (i) => first + 2 * n + i;
+  // pictures (0.5 WL.13): after everything else, each image followed by its soft mask when it has one
+  const imgBase = outlines ? itemNo(n) : pageNo(n), imgNo = [];
+  { let k = imgBase; for (const im of images) { imgNo.push(k); k += im.smask ? 2 : 1; } }
+  const imgNoOf = (k) => imgNo[k];
   obj(1, '<< /Type /Catalog /Pages 2 0 R' + (outlines ? ' /Outlines 5 0 R /PageMode /UseOutlines' : '') + ' >>');
   obj(2, '<< /Type /Pages /Kids [' + pages.map((_, i) => pageNo(i) + ' 0 R').join(' ') + '] /Count ' + n + ' >>');
   obj(3, '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>');
@@ -282,11 +335,18 @@ function assemble(pages, title) {
   obj(5, outlines ? '<< /Type /Outlines /First ' + itemNo(0) + ' 0 R /Last ' + itemNo(n - 1) + ' 0 R /Count ' + n + ' >>' : '<< >>');
   pages.forEach((p, i) => {
     const gs = (p.alphas || []).length ? ' /ExtGState << ' + p.alphas.map((a, k) => '/GA' + k + ' << /Type /ExtGState /CA ' + num(a) + ' /ca ' + num(a) + ' >>').join(' ') + ' >>' : '';
-    obj(pageNo(i), '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ' + pt(p.w) + ' ' + pt(p.h) + '] /Resources << /Font << /F1 3 0 R >>' + gs + ' >> /Contents ' + (pageNo(i) + 1) + ' 0 R >>');
+    const xo = (p.xobjects || []).length ? ' /XObject << ' + p.xobjects.map((k) => '/Im' + k + ' ' + imgNoOf(k) + ' 0 R').join(' ') + ' >>' : '';
+    obj(pageNo(i), '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ' + pt(p.w) + ' ' + pt(p.h) + '] /Resources << /Font << /F1 3 0 R >>' + gs + xo + ' >> /Contents ' + (pageNo(i) + 1) + ' 0 R >>');
     obj(pageNo(i) + 1, ['<< /Length ' + p.content.length + (p.flate ? ' /Filter /FlateDecode' : '') + ' >>\nstream\n', p.content, '\nendstream']);
   });
   if (outlines) pages.forEach((p, i) => obj(itemNo(i), '<< /Title ' + pdfText(p.name) + ' /Parent 5 0 R' + (i ? ' /Prev ' + itemNo(i - 1) + ' 0 R' : '') + (i < n - 1 ? ' /Next ' + itemNo(i + 1) + ' 0 R' : '') + ' /Dest [' + pageNo(i) + ' 0 R /Fit] >>'));
-  const total = outlines ? itemNo(n) : pageNo(n);
+  images.forEach((im, i) => {
+    const no = imgNo[i];
+    obj(no, ['<< /Type /XObject /Subtype /Image /Width ' + im.w + ' /Height ' + im.h + ' /ColorSpace /' + (im.colors === 1 ? 'DeviceGray' : 'DeviceRGB') + ' /BitsPerComponent 8 /Filter /' + im.filter
+      + (im.smask ? ' /SMask ' + (no + 1) + ' 0 R' : '') + ' /Length ' + im.data.length + ' >>\nstream\n', im.data, '\nendstream']);
+    if (im.smask) obj(no + 1, ['<< /Type /XObject /Subtype /Image /Width ' + im.w + ' /Height ' + im.h + ' /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode /Length ' + im.smask.data.length + ' >>\nstream\n', im.smask.data, '\nendstream']);
+  });
+  const total = images.length ? imgNo[imgNo.length - 1] + (images[images.length - 1].smask ? 2 : 1) : imgBase;
   const xref = size;
   push('xref\n0 ' + total + '\n0000000000 65535 f \n' + offsets.slice(1, total).map((o) => String(o).padStart(10, '0') + ' 00000 n \n').join(''));
   push('trailer\n<< /Size ' + total + ' /Root 1 0 R /Info 4 0 R >>\nstartxref\n' + xref + '\n%%EOF\n');
@@ -326,6 +386,11 @@ export function drawPreview(ctx, list, { pxPerMm, pen = 0.25, font = 'Helvetica,
         else { const a = q.rev ? q.a1 : q.a0, b = q.rev ? q.a0 : q.a1; ctx.moveTo(q.cx + q.r * Math.cos(a), q.cy + q.r * Math.sin(a)); ctx.arc(q.cx, q.cy, q.r, a, b, !!q.rev); }
       }
       ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    for (const mk of v.masks || []) {   // text background masks (WL.8): over the lines, under the text
+      const l = mk.loop;
+      ctx.fillStyle = mk.color; ctx.beginPath(); ctx.moveTo(l[0], l[1]); for (let i = 2; i + 1 < l.length; i += 2) ctx.lineTo(l[i], l[i + 1]); ctx.closePath(); ctx.fill();
     }
     for (const t of v.texts) {
       const e = t.e, lay = textLayout(e), fs = e.h * FONT_EM * pxPerMm;

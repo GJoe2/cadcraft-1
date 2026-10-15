@@ -198,10 +198,12 @@ export function wirenoNets(model, nl, assoc = ASSOC) {
 
 /**
  * Number the wires (inside doc.change — the caller's). opts: format, per ('net' | 'wire'), start (first seq), clean
- * (remove wire numbers that sit on no wire), layer. Locked numbers stay and are never given to another net.
+ * (remove wire numbers that sit on no wire), layer, only (a Set of wire uids: number just the groups with one of these
+ * wires — a placed design block, 0.5 WL.35 — every other number stays as it is and is not given out again; no clean-up).
+ * Locked numbers stay and are never given to another net.
  * → {added, changed, removed, kept, numbers: Map net key → number}.
  */
-export function numberWires(doc, model, nl, { format = '{sheet}.{path}.{seq}', per = 'net', start = 1, clean = true, layer = 'EL-WIRENO' } = {}) {
+export function numberWires(doc, model, nl, { format = '{sheet}.{path}.{seq}', per = 'net', start = 1, clean = true, layer = 'EL-WIRENO', only = null } = {}) {
   ensureBlock(doc, helperBlock('wireno'));
   const owners = wirenoNets(model, nl);
   // groups to number: nets, or every wire on its own
@@ -225,13 +227,15 @@ export function numberWires(doc, model, nl, { format = '{sheet}.{path}.{seq}', p
     if (g) wirenosOf.get(g.key).push(wn); else orphans.push(wn);
   }
   const used = new Set();
-  for (const g of groups) for (const wn of wirenosOf.get(g.key)) if (wn.locked && wn.value) used.add(wn.value);
+  const ours = (g) => !only || g.wires.some((w) => only.has(w.uid));
+  for (const g of groups) for (const wn of wirenosOf.get(g.key)) if ((wn.locked || !ours(g)) && wn.value) used.add(wn.value);
   groups.sort((a, b) => cmpNumber(a.start.sheet.number, b.start.sheet.number) || (a.start.path - b.start.path) || (b.start.at.y - a.start.at.y) || (a.start.at.x - b.start.at.x));
   const seqOf = new Map();
   const numbers = new Map();
   const r = { added: 0, changed: 0, removed: 0, kept: 0, numbers };
   for (const g of groups) {
     const mine = wirenosOf.get(g.key);
+    if (!ours(g)) { const v = mine.find((wn) => wn.value)?.value; if (v) numbers.set(g.key, v); r.kept += mine.length; continue; }
     const locked = mine.find((wn) => wn.locked && wn.value);
     let value;
     if (locked) value = locked.value;
@@ -257,7 +261,7 @@ export function numberWires(doc, model, nl, { format = '{sheet}.{path}.{seq}', p
       r.changed++;
     }
   }
-  if (clean) for (const wn of orphans) { doc.remove(wn.id, wn.space.map); r.removed++; }
+  if (clean && !only) for (const wn of orphans) { doc.remove(wn.id, wn.space.map); r.removed++; }
   return r;
 }
 

@@ -7,7 +7,8 @@
  *   api = { ...sharedApi (ui.toolbarGroup, ui.panelSection, ui.settingsSection, files.importer / exporter),
  *           commands: { add, option, has, run }, toolbar: { group, menuItem }, props: { section },
  *           doc, engine, print, selection, select, redraw, drawing: { afterChange }, data: { get, set },
- *           objects: { define, create, update, is, kindOf, dataOf, refresh } }
+ *           objects: { define, create, update, is, kindOf, dataOf, refresh },
+ *           solids: { set, remove, apply, keys } (0.5, cad-mep: solids on the 3D tab kept in step with the drawing) }
  * Everything an add-on registers is taken away again when it is switched off (api.onDeactivate).
  *
  * DOM-free except the toolbar/menu parts, which do nothing without a document: bin/test-cadcraft-addons.mjs runs it in Node
@@ -20,6 +21,8 @@ import { addSection } from '../propdefs.js';
 import { Doc, TYPE_NAMES } from '../doc.js';
 import { ObjectKinds } from './objects.js';
 import { installTrust, bundledOnly, NO_PACKAGES } from './trust.js';
+import { meshDef, softenEdges } from '../m3d/model.js';
+import { translation } from '../m3d/vec.js';
 import { t } from '../i18n.js';
 
 export const CADCRAFT_API_VERSION = '1.0';
@@ -153,12 +156,74 @@ export function makeCadcraftApi(base, addon, ctx) {
     update: (e, data) => {
       const i = kinds.info(e);
       if (!i || i.addonId !== addon.id) throw new Error('objects.update: not one of this add-on\'s objects');   // i18n-ignore (developer error)
-      return kinds.update(e, data);
+      const out = kinds.update(e, data);
+      // 0.5 api.update-in-hook (cad-mep): inside an open change its graphics block is defined at once, so an afterChange hook
+      // (which runs after CadCraft has drawn the change's objects) can update other objects of its own
+      const d = ctx.doc;
+      if (d?.pending && !d.blocks.has(out.block)) { const g = kinds.graphics(i.def, data); d.defineBlock({ name: g.name, base: { x: 0, y: 0 }, entities: g.entities }); }
+      return out;
     },
     is: (e, kind = null) => { const i = kinds.info(e); return !!i && i.addonId === addon.id && (!kind || i.kind === kind); },
     kindOf: (e) => { const i = kinds.info(e); return i && i.addonId === addon.id ? i.kind : null; },
     dataOf: (e) => { const i = kinds.info(e); return i && i.addonId === addon.id && !i.newer ? structuredClone(i.data) : null; },
     refresh: (kind = null) => kinds.refresh(ctx.doc, addon.id, kind),
+  };
+
+  /**
+   * 0.5 api.solids (cad-mep): solids on the 3D tab that the add-on keeps in step with its drawing (a duct run, a pipe run).
+   * Each has a key; set() replaces the solid of that key (or removes it: spec null) in one 3D edit, which joins the open
+   * drawing change (one undo step with the 2D edit). Polygons are in drawing units, faces pointing outward; CadCraft turns
+   * them into meters. A solid is an ordinary 3D group: without the add-on it stays, shows, saves and can be edited.
+   */
+  const SOLID_KEY = /^[A-Za-z0-9_.-]{1,64}$/;
+  const mark = (key) => ' [' + addon.id + ':' + key + ']';
+  const ownSolid = (inst) => typeof inst.name === 'string' && inst.name.endsWith(']') && inst.name.includes(' [' + addon.id + ':');
+  const solids = {
+    /** set(key, {name, polys: [[[x, y, z]…]…], color?: '#rrggbb', tag?, smooth?: degrees} | null, doc?) → the placement id or null. */
+    set(key, spec, doc = ctx.doc) { return solids.apply({ [key]: spec }, doc)[key] ?? null; },
+    remove(key, doc = ctx.doc) { solids.apply({ [key]: null }, doc); },
+    /** Many at once, one 3D edit: { key: spec | null }. → { key: placement id | null }. */
+    apply(map, doc = ctx.doc) {
+      const M3 = doc?.model3d, out = {};
+      if (!M3) return out;
+      const entries = Object.entries(map || {});
+      for (const [key] of entries) if (!SOLID_KEY.test(key)) throw new Error('solids: a key is ' + SOLID_KEY);   // i18n-ignore (developer error)
+      const k = M3.k;
+      M3.change('3D', (M) => {
+        for (const [key, spec] of entries) {
+          const tail = mark(key);
+          for (const [iid, inst] of [...M.root.insts]) {
+            if (inst.name !== undefined && String(inst.name).endsWith(tail)) {
+              M.root.insts.delete(iid);
+              if (![...M.defs.values()].some((d) => [...d.insts.values()].some((x) => x.def === inst.def))) M.defs.delete(inst.def);
+            }
+          }
+          out[key] = null;
+          const polys = spec && Array.isArray(spec.polys) ? spec.polys.filter((p) => Array.isArray(p) && p.length >= 3 && p.every((q) => Array.isArray(q) && q.length === 3 && q.every(Number.isFinite))) : [];
+          if (!polys.length) continue;
+          const o = polys[0][0];
+          const P = polys.map((p) => p.map((q) => [(q[0] - o[0]) * k, (q[1] - o[1]) * k, (q[2] - o[2]) * k]));
+          const name = String(spec.name || addon.manifest?.name || addon.id).replace(/[\u0000-\u001f]/g, ' ').slice(0, 60);
+          const d = meshDef(M, P, M.uniqueName(name));
+          if (!d.faces.size) { M.defs.delete(d.id); continue; }
+          if (Number(spec.smooth) > 0) softenEdges(d, [...d.edges.keys()], Math.min(60, Number(spec.smooth)));   // round surfaces shade smooth
+          const iid = M.place(M.root, d.id, translation([o[0] * k, o[1] * k, o[2] * k]));
+          const inst = M.root.insts.get(iid);
+          inst.name = name + tail;
+          if (typeof spec.color === 'string' && /^#[0-9a-f]{6}$/i.test(spec.color)) inst.color = spec.color;
+          if (typeof spec.tag === 'string' && spec.tag.trim()) inst.tag = M.tag(spec.tag)?.name || M.addTag(spec.tag);
+          out[key] = iid;
+        }
+      });
+      return out;
+    },
+    /** The keys of this add-on's solids in the drawing. */
+    keys(doc = ctx.doc) {
+      const M = doc?.model3d;
+      if (!M) return [];
+      const pre = ' [' + addon.id + ':';
+      return [...M.root.insts.values()].filter(ownSolid).map((i) => i.name.slice(i.name.lastIndexOf(pre) + pre.length, -1));
+    },
   };
 
   return {
@@ -169,6 +234,7 @@ export function makeCadcraftApi(base, addon, ctx) {
     props,
     drawing,
     objects,
+    solids,
     data: { get: (e) => kinds.getData(addon.id, e), set: (e, v) => kinds.setData(addon.id, e, v) },
     get doc() { return ctx.doc; },
     get engine() { return ctx.engine; },

@@ -271,7 +271,7 @@ export function createPropsPanel(o) {
     const isLib = !!e.attrs?.[LIB_TAGS.uuid];
     list.forEach((a, i) => {
       const id = 'cc-p-att' + i;
-      const locked = a.constant || (isLib && a.tag !== LIB_TAGS.item && a.tag !== LIB_TAGS.qty);
+      const locked = a.constant || (isLib && a.tag !== LIB_TAGS.item && a.tag !== LIB_TAGS.qty && a.tag !== 'CC-PART-MATERIAL');   // a part's material is the user's to set (0.5 MQ.4)
       const label = el('label', { htmlFor: id, title: (a.prompt ? a.prompt + ' — ' : '') + a.tag + (a.invisible ? ' ' + t('props.att.hidden.title') : '') + (a.constant ? ' ' + t('props.att.constant.title') : '') },
         a.tag, a.invisible ? el('span', { className: 'cc-muted' }, ' ' + t('props.att.hidden')) : null);
       if (locked) { out.attrs.push(label, el('span', { className: 'v cc-att-ro', id, title: a.value }, a.value || '–')); return; }

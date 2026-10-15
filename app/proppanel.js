@@ -30,6 +30,7 @@ function el(tag, props = {}, ...children) {
   for (const [k, v] of Object.entries(props)) {
     if (v === undefined || v === null || v === false) continue;
     if (k === 'className') n.className = v;
+    else if (k === 'htmlFor') n.htmlFor = v;   // a label's for= (setAttribute('htmlFor') named nothing)
     else if (k === 'dataset') Object.assign(n.dataset, v);
     else if (k in n && typeof v !== 'string') n[k] = v;
     else n.setAttribute(k, v === true ? '' : String(v));

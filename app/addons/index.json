@@ -1,5 +1,8 @@
 {
   "addons": [
-    "electrical"
+    "electrical",
+    "apparel",
+    "hvac",
+    "piping"
   ]
 }

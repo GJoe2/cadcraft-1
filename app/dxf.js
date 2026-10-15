@@ -19,12 +19,12 @@
  * layout is kept as a block named CCLAYOUT_n that CadCraft reads back as a layout.
  */
 
-import { TAU, normAngle, ellipsePoints, rad, deg, textLayout, mMul, mTranslate, mRotate, mApply, viewportCorners, explodeEntity, entityBounds, emptyBounds, validBounds } from './geom.js';
+import { TAU, normAngle, ellipsePoints, rad, deg, textLayout, mMul, mTranslate, mRotate, mApply, viewportCorners, explodeEntity, entityBounds, emptyBounds, validBounds, clipInfinite } from './geom.js';
 import { t } from './i18n.js';
 import { readDxfModel } from './dxf-model.js';
 import { patternOf } from './linetypes.js';
 import { isXrefRoot } from './xref.js';
-import { extrasFrom, EXTRA_TYPES } from './dwg-import.js';
+import { extrasFrom, EXTRA_TYPES, maskOf } from './dwg-import.js';
 import { forFile, parametricText, refKeyIn, isParamBlock, PARAM_BLOCK } from './gcons.js';
 import { attdef, resolveAttribs, worldAttribs } from './attrs.js';
 import { nearestAci } from './doc.js';
@@ -33,6 +33,8 @@ import { matchPaper } from './sheets.js';
 import { forFile3d, read3dText, read3dView, isM3dBlock, M3D_BLOCK, split3d } from './model3d.js';
 import { vportRecords, vportsFrom } from './dwg-vports.js';
 import { trFrom, trWord, propsFromXdata, propsXdata, stFromCodes, stFromVars, ccDimFrom, dstyleItems, ccDimItems, dimstylePairs } from './dwg-props.js';
+import { pictureRefs } from './pictures.js';
+import { clipFromFilter } from './xclip.js';
 
 const UNITS = { 0: '', 1: 'inches', 2: 'feet', 3: 'miles', 4: 'millimeters', 5: 'centimeters', 6: 'meters', 7: 'kilometers', 8: 'microinches', 9: 'mils', 10: 'yards' };
 const UNIT_CODES = Object.fromEntries(Object.entries(UNITS).filter(([, v]) => v).map(([k, v]) => [v, +k]));
@@ -62,6 +64,8 @@ export function readDxf(text) {
   const paperBlocks = new Map();          // *Paper_SpaceN → raw entity list
   let paperRaw = [];                      // ENTITIES with 67 = 1 (the active layout)
   const noPlot = new Set();               // layer names (upper case) CadCraft wrote as not plotting
+  const layerByH = new Map();             // layer handle (upper case) → name, for viewports' frozen layers (VP.1, group 331)
+  const dictByH = new Map(), filterByH = new Map();   // DICTIONARY entries and SPATIAL_FILTERs by handle (XCLIP, WL.16)
   const ctx = { dimStyles, out };
   let i = 0;
   const at = () => pairs[i] || [0, 'EOF'];
@@ -91,8 +95,13 @@ export function readDxf(text) {
   // attributes: values and positions relative to their block, now that every block is known
   const blockMap = new Map(out.blocks.map((b) => [b.name, b]));
   resolveAttribs([out.entities, paperRaw, ...paperBlocks.values(), ...out.blocks.map((b) => b.entities), ...out.layouts.map((l) => l.entities)], blockMap);
+  resolveClips();
   buildLayouts();
-  if (out._vports) { const v = vportsFrom(out._vports); delete out._vports; if (v) out.vports = v; }
+  if (out._vports) { const v = vportsFrom(out._vports); const tw = out._vports[0]?.tw; delete out._vports; if (v) out.vports = v; else if (Number.isFinite(tw) && Math.abs(tw) > 1e-12) out.viewTwist = tw; }
+  if (header.$UCSORG && header.$UCSXDIR) {   // the current UCS (DR.8)
+    const x = +header.$UCSXDIR[10] || 0, y = +header.$UCSXDIR[20] || 0, ox = +header.$UCSORG[10] || 0, oy = +header.$UCSORG[20] || 0;
+    if ((x || y) && (ox || oy || Math.abs(Math.atan2(y, x)) > 1e-12)) (out.ucs ||= { current: null, named: [] }).current = { x: ox, y: oy, ang: Math.atan2(y, x) };
+  }
   // 0.4 C6: multileaders, pictures and wipeouts come through the drawing model the DWG import uses (dxf-model.js)
   if (/\n\s*0\r?\n(MULTILEADER|IMAGE|WIPEOUT)\r?\n/.test(text)) mergeExtras();
   if (out.report.xrefs) out.report.notes.push(t('dwg.read.xrefs', { n: out.report.xrefs }));
@@ -143,7 +152,8 @@ export function readDxf(text) {
           const col = parseInt(val(g, 62) ?? '7', 10), flags = parseInt(val(g, 70) ?? '0', 10);
           const tc = val(g, 420);
           const lw = parseInt(val(g, 370) ?? '-3', 10);
-          out.layers.push({ name, color: tc !== undefined ? trueColor(tc) : (Math.abs(col) || 7), on: col >= 0, frozen: !!(flags & 1), locked: !!(flags & 4), plot: val(g, 290) !== '0',
+          const lh = val(g, 5); if (lh) layerByH.set(lh.toUpperCase(), name);
+          out.layers.push({ name, color: tc !== undefined ? trueColor(tc) : (Math.abs(col) || 7), on: col >= 0, frozen: !!(flags & 1), locked: !!(flags & 4), ...(flags & 2 ? { newVpFrozen: true } : {}), plot: val(g, 290) !== '0',
             linetype: val(g, 6) || 'Continuous', lineweight: lw >= 0 && lw <= 211 ? lw / 100 : -3 });
         }
       } else if (t === 'DIMSTYLE') {
@@ -185,8 +195,12 @@ export function readDxf(text) {
         const g = group();
         if (/^\*active$/i.test(val(g, 2) || '')) {
           const sheet = (xdata(g).CADCRAFT || []).map((x) => decodeText(String(x[1]))).find((x) => x.startsWith('PANESHEET:'));
-          (out._vports ||= []).push({ x0: num(g, 10), y0: num(g, 20), x1: num(g, 11), y1: num(g, 21), cx: num(g, 12), cy: num(g, 22), h: num(g, 40), ...(sheet ? { sheet: sheet.slice(10) } : {}) });
+          (out._vports ||= []).push({ x0: num(g, 10), y0: num(g, 20), x1: num(g, 11), y1: num(g, 21), cx: num(g, 12), cy: num(g, 22), h: num(g, 40), tw: rad(num(g, 51)), ...(sheet ? { sheet: sheet.slice(10) } : {}) });
         }
+      } else if (t === 'UCS') {   // named UCSs (DR.8): origin 10/20, X axis 11/21
+        i++;
+        const g = group(), name = val(g, 2), x = num(g, 11), y = num(g, 21);
+        if (name && (x || y)) ((out.ucs ||= { current: null, named: [] }).named).push({ name, x: num(g, 10), y: num(g, 20), ang: Math.atan2(y, x) });
       } else if (t === 'BLOCK_RECORD') {
         i++;
         const g = group();
@@ -234,9 +248,35 @@ export function readDxf(text) {
           min: { x: num(lg, 10), y: num(lg, 20) }, max: { x: num(lg, 11), y: num(lg, 21) },
           paperMm: { w: num(pg, 44), h: num(pg, 45) }, units: parseInt(val(pg, 72) ?? '-1', 10), rot: parseInt(val(pg, 73) ?? '0', 10),
         });
+      } else if (at()[0] === 0 && (at()[1].trim() === 'DICTIONARY' || at()[1].trim() === 'SPATIAL_FILTER')) {
+        const type = at()[1].trim();
+        i++;
+        const g = group(), hd = (val(g, 5) || '').toUpperCase();
+        if (type === 'DICTIONARY') {
+          const e = {};
+          for (let k = 0; k + 1 < g.length; k++) if (g[k][0] === 3 && g[k + 1][0] === 350) e[g[k][1].trim()] = g[k + 1][1].trim().toUpperCase();
+          dictByH.set(hd, e);
+        } else {
+          const k0 = g.findIndex(([c]) => c === 70), pts = [];
+          for (let k = k0 + 1; k + 1 < g.length && g[k][0] === 10; k += 2) pts.push({ x: parseFloat(g[k][1]), y: parseFloat(g[k + 1][1]) });
+          const m = g.filter(([c]) => c === 40).map(([, v]) => parseFloat(v));
+          filterByH.set(hd, { points: pts, ...(m.length === 24 ? { inverseBlockTransform: m.slice(0, 12), clipTransform: m.slice(12) } : {}) });
+        }
       } else i++;
     }
     i++;
+  }
+
+  /** XCLIP (WL.16): each reference that names an extension dictionary → ACAD_FILTER → SPATIAL gets its clip. */
+  function resolveClips() {
+    const lists = [out.entities, paperRaw, ...paperBlocks.values(), ...out.blocks.map((b) => b.entities), ...out.layouts.map((l) => l.entities)];
+    for (const list of lists) for (const e of list || []) {
+      if (!e || !e._xd) continue;
+      const f = filterByH.get(dictByH.get(dictByH.get(e._xd)?.ACAD_FILTER || '')?.SPATIAL || '');
+      delete e._xd;
+      const c = f ? clipFromFilter(f) : null;
+      if (c) e.clip = c;
+    }
   }
 
   /** The group codes up to the next 0 code. */
@@ -284,6 +324,11 @@ export function readDxf(text) {
     const guessUnit = () => (out.meta.units ? (['inches', 'feet', 'yards', 'miles', 'mils', 'microinches'].includes(out.meta.units) ? 'in' : 'mm') : header.$MEASUREMENT?.[70] === '0' ? 'in' : 'mm');
     const fromList = (name, list, lim, unit) => {
       const { entities, overall } = splitViewports(list);
+      for (const e of entities) {   // frozen layers by handle (DXF 2000+) → names; unknown handles dropped
+        if (e.type !== 'viewport' || !e._frzH) continue;
+        const frz = [...new Set([...(e.frz || []), ...e._frzH.map((x) => layerByH.get(x.toUpperCase())).filter(Boolean)])];
+        delete e._frzH; if (frz.length) e.frz = frz; else delete e.frz;
+      }
       const cc = overall?.cc;
       for (const n of cc?.noplot || []) noPlot.add(n.toUpperCase());
       const paper = cc ? { w: cc.w, h: cc.h, x0: cc.x0, y0: cc.y0, unit: cc.unit, key: cc.key || undefined }
@@ -340,7 +385,8 @@ function layoutFromBlock(ents) {
       if (e.cc && e.cc[0] === 'VIEWPORT' && e.type === 'poly' && e.pts.length >= 4) {
         const xs = e.pts.map((p) => p.x), ys = e.pts.map((p) => p.y);
         const x1 = Math.min(...xs), x2 = Math.max(...xs), y1 = Math.min(...ys), y2 = Math.max(...ys);
-        return { type: 'viewport', layer: e.layer, color: e.color, x: (x1 + x2) / 2, y: (y1 + y2) / 2, w: x2 - x1, h: y2 - y1, cx: +e.cc[1], cy: +e.cc[2], s: +e.cc[3] };
+        const frz = e.cc[4] === 'FRZ' ? e.cc.slice(5).filter(Boolean) : [];   // layers frozen in it (VP.1)
+        return { type: 'viewport', layer: e.layer, color: e.color, x: (x1 + x2) / 2, y: (y1 + y2) / 2, w: x2 - x1, h: y2 - y1, cx: +e.cc[1], cy: +e.cc[2], s: +e.cc[3], ...(frz.length ? { frz } : {}) };
       }
       const c = { ...e }; delete c.cc; return c;
     }),
@@ -446,6 +492,8 @@ const ISLAND = { 1: 'outer', 2: 'ignore' };
 
 /** entityFrom0 + the Properties panel's fields the file keeps (P.3–P.7; dwg-props.js): Z, thickness, widths, styles, flags, xdata. */
 function entityFrom(type, g, follow, rep, ctx) {
+  // group 60 = 1: an object the file hides (a dynamic block's other visibility states) is not drawn, as in the DWG reader
+  if (val(g, 60) === '1' && type !== 'ATTDEF' && type !== 'VIEWPORT') { rep.hidden = (rep.hidden || 0) + 1; return null; }
   const made = entityFrom0(type, g, follow, rep, ctx);
   if (!made) return made;
   const list = [].concat(made);
@@ -465,7 +513,11 @@ function entityFrom(type, g, follow, rep, ctx) {
       if (q && +q[1]) add.obl = rad(+q[1]);
     }
   }
-  if (type === 'INSERT') { const sz = num(g, 43, 1); if (sz && sz !== 1) add.sz = sz; }
+  if (type === 'INSERT') {
+    const sz = num(g, 43, 1); if (sz && sz !== 1) add.sz = sz;
+    const xi = g.findIndex(([c, v]) => c === 102 && v.trim() === '{ACAD_XDICTIONARY');   // its extension dictionary (XCLIP, WL.16)
+    if (xi >= 0 && g[xi + 1]?.[0] === 360) add._xd = g[xi + 1][1].trim().toUpperCase();
+  }
   if (type === 'HATCH') { if (ISLAND[parseInt(val(g, 75) ?? '0', 10)]) add.island = ISLAND[parseInt(val(g, 75), 10)]; if (val(g, 71) === '1') add.assoc = true; }
   if (type === 'DIMENSION' && one.type === 'dim') {
     const ds = val(g, 3);
@@ -498,6 +550,11 @@ function entityFrom0(type, g, follow, rep, ctx) {
   switch (type) {
     case 'LINE': return { type: 'line', ...base, x1: num(g, 10), y1: num(g, 20), x2: num(g, 11), y2: num(g, 21) };
     case 'POINT': return { type: 'point', ...base, x: num(g, 10), y: num(g, 20), ...(cc ? { cc } : {}) };
+    case 'XLINE': case 'RAY': {   // 0.5 DR.7: point (10) and unit direction (11)
+      const dx = num(g, 11), dy = num(g, 21), n = Math.hypot(dx, dy);
+      if (!(n > 1e-12)) { skip(rep, type); return null; }
+      return { type: type === 'XLINE' ? 'xline' : 'ray', ...base, x: num(g, 10), y: num(g, 20), dx: dx / n, dy: dy / n };
+    }
     // the 3D tab's faces (model3d.js split3d takes them out of the 2D drawing)
     case '3DFACE': return { type: 'face3d', ...base, pts: [0, 1, 2, 3].map((k) => [num(g, 10 + k), num(g, 20 + k), num(g, 30 + k)]) };
     case 'CIRCLE': return { type: 'circle', ...base, cx: X(num(g, 10)), cy: num(g, 20), r: num(g, 40) };
@@ -561,6 +618,8 @@ function entityFrom0(type, g, follow, rep, ctx) {
         type: 'text', ...base, x: num(g, 10), y: num(g, 20), h: num(g, 40, 2.5) || 2.5, rot: normAngle(rot), s,
         ha: ['left', 'center', 'right'][(att - 1) % 3], va: ['top', 'middle', 'bottom'][Math.floor((att - 1) / 3)],
         ...(ww > 0 ? { ww } : {}), ...(ls > 0 && ls !== 1 ? { ls } : {}),
+        ...maskOf({ backgroundFlags: parseInt(val(g, 90) ?? '0', 10), backgroundScale: num(g, 45, 1.5),
+          backgroundColor: val(g, 421) !== undefined ? { rgb: parseInt(val(g, 421), 10) } : { index: parseInt(val(g, 63) ?? '7', 10) } }),   // background mask (WL.8)
       };
     }
     case 'ELLIPSE': {
@@ -644,9 +703,15 @@ function entityFrom0(type, g, follow, rep, ctx) {
           const reals = mv.filter(([c]) => c === 1040).map(([, x]) => +x);
           const tgt = mv.find(([c]) => c === 1010), tgy = mv.find(([c]) => c === 1020);
           vh = reals[1]; vc = { x: reals[2] + (tgt ? +tgt[1] : 0), y: reals[3] + (tgy ? +tgy[1] : 0) };
+          const frz = mv.filter(([c]) => c === 1003).map(([, n]) => n).filter(Boolean);   // R12: the frozen layers' names (VP.1)
+          if (frz.length) v.frz = [...new Set(frz)];
         }
       }
+      const fh = g.filter(([c]) => c === 331).map(([, x]) => x.trim()).filter(Boolean);   // DXF 2000+: frozen layers' handles, named in buildLayouts
+      if (fh.length) v._frzH = fh;
       if (vc && vh > 0 && v.h > 0) { v.cx = vc.x; v.cy = vc.y; v.s = v.h / vh; } else { v.cx = v.x; v.cy = v.y; v.s = 1; }
+      { const tw = val(g, 51) !== undefined ? rad(num(g, 51)) : (xlist(xd.ACAD, 'MVIEW') || []).filter(([c]) => c === 1040).map(([, x]) => +x)[0];   // its twist (DR.8)
+        if (Number.isFinite(tw) && Math.abs(tw) > 1e-12) v.tw = tw; }
       if (cc && cc[0] === 'LAYOUT') { v.overall = true; v.cc = { name: decodeText(cc[1] || ''), unit: cc[2] === 'in' ? 'in' : 'mm', key: cc[3], x0: +cc[4], y0: +cc[5], w: +cc[6], h: +cc[7], noplot: cc[8] === 'NOPLOT' ? cc.slice(9) : [] }; }
       return v;
     }
@@ -772,6 +837,15 @@ export function writeDxf(doc) {
   const report = { notes: [], counts: {} };
   const note = (k, n = 1) => { report.counts[k] = (report.counts[k] || 0) + n; };
   const pf = forFile(doc);   // constraints + parameters: CCREF xdata on entities, block CADCRAFT_PARAMETRIC (gcons.js)
+  // R12 has no XLINE / RAY (0.5 DR.7): they become lines across the drawing's extents (xlines have none of their own)
+  let extents = null;
+  const drawingExtents = () => {
+    if (extents) return extents;
+    const b = emptyBounds();
+    for (const x of doc.model.values()) { const q = entityBounds(x, doc.blocks); if (validBounds(q)) { b.minX = Math.min(b.minX, q.minX); b.minY = Math.min(b.minY, q.minY); b.maxX = Math.max(b.maxX, q.maxX); b.maxY = Math.max(b.maxY, q.maxY); } }
+    extents = validBounds(b) && (b.maxX > b.minX || b.maxY > b.minY) ? b : { minX: -100, minY: -100, maxX: 100, maxY: 100 };
+    return extents;
+  };
   const lines = [];
   const w = (code, v) => { lines.push(String(code).padStart(3, ' ')); lines.push(String(v)); };
   const f = (n) => (Math.abs(n) < 1e-12 ? '0.0' : Number(n.toPrecision(15)).toString());
@@ -838,6 +912,12 @@ export function writeDxf(doc) {
   w(9, '$TEXTSIZE'); w(40, f(doc.current.textHeight));
   if (doc.meta.ltscale > 0 && doc.meta.ltscale !== 1) { w(9, '$LTSCALE'); w(40, f(doc.meta.ltscale)); }
   if (unitCode(doc.meta.units)) { w(9, '$INSUNITS'); w(70, unitCode(doc.meta.units)); }
+  if (doc.ucs) {   // the current UCS (DR.8)
+    const a = doc.ucs.ang || 0;
+    w(9, '$UCSORG'); w(10, f(doc.ucs.x)); w(20, f(doc.ucs.y)); w(30, '0.0');
+    w(9, '$UCSXDIR'); w(10, f(Math.cos(a))); w(20, f(Math.sin(a))); w(30, '0.0');
+    w(9, '$UCSYDIR'); w(10, f(-Math.sin(a))); w(20, f(Math.cos(a))); w(30, '0.0');
+  }
   if (doc.meta.lunits >= 1 && doc.meta.lunits <= 5) { w(9, '$LUNITS'); w(70, doc.meta.lunits | 0); if (Number.isFinite(doc.meta.luprec)) { w(9, '$LUPREC'); w(70, doc.meta.luprec | 0); } }
   for (const [name, key] of [['$DIMSCALE', 'scale'], ['$DIMASZ', 'asz'], ['$DIMEXO', 'exo'], ['$DIMDLI', 'dli'], ['$DIMEXE', 'exe'], ['$DIMTXT', 'txt'], ['$DIMGAP', 'gap']]) { w(9, name); w(40, f(st[key])); }
   w(9, '$DIMTAD'); w(70, st.tad | 0);
@@ -853,17 +933,17 @@ export function writeDxf(doc) {
   // TABLES
   w(0, 'SECTION'); w(2, 'TABLES');
   // the split screen (doc.vports, dwg-vports.js): one *ACTIVE per pane, the current one first; one pane writes no table
-  if (doc.vports) {
+  if (doc.vports || doc.viewTwist) {   // (one pane with a turned view too, DR.8)
     const b = emptyBounds();
     for (const e of doc.model.values()) { const eb = entityBounds(e, doc.blocks); if (validBounds(eb)) { b.minX = Math.min(b.minX, eb.minX); b.minY = Math.min(b.minY, eb.minY); b.maxX = Math.max(b.maxX, eb.maxX); b.maxY = Math.max(b.maxY, eb.maxY); } }
     const fb = validBounds(b) ? { cx: (b.minX + b.maxX) / 2, cy: (b.minY + b.maxY) / 2, h: Math.max(b.maxY - b.minY, (b.maxX - b.minX) / 1.6, 1e-6) * 1.05 } : { cx: 0, cy: 0, h: 10 };
-    const recs = vportRecords(doc.vports, fb);
+    const recs = vportRecords(doc.vports, fb, doc.viewTwist);
     w(0, 'TABLE'); w(2, 'VPORT'); w(70, recs.length);
     for (const r of recs) {
       w(0, 'VPORT'); w(2, '*ACTIVE'); w(70, 0);
       w(10, f(r.x0)); w(20, f(r.y0)); w(11, f(r.x1)); w(21, f(r.y1)); w(12, f(r.cx)); w(22, f(r.cy));
       w(13, '0.0'); w(23, '0.0'); w(14, '1.0'); w(24, '1.0'); w(15, '0.0'); w(25, '0.0'); w(16, '0.0'); w(26, '0.0'); w(36, '1.0'); w(17, '0.0'); w(27, '0.0'); w(37, '0.0');
-      w(40, f(r.h)); w(41, f(r.aspect)); w(42, '50.0'); w(43, '0.0'); w(44, '0.0'); w(50, '0.0'); w(51, '0.0');
+      w(40, f(r.h)); w(41, f(r.aspect)); w(42, '50.0'); w(43, '0.0'); w(44, '0.0'); w(50, '0.0'); w(51, f(deg(r.tw || 0)));
       w(71, 0); w(72, 100); w(73, 1); w(74, 3); w(75, 0); w(76, 0); w(77, 0); w(78, 0);
       if (r.sheet) { w(1001, 'CADCRAFT'); w(1000, encodeText('PANESHEET:' + r.sheet.slice(0, 245))); }
     }
@@ -900,7 +980,7 @@ export function writeDxf(doc) {
   for (const l of doc.layers.values()) {
     let c = typeof l.color === 'string' ? (note('truecolor'), nearestAci(l.color)) : (l.color || 7);
     if (!l.on) c = -Math.abs(c);
-    w(0, 'LAYER'); w(2, layerName(l.name)); w(70, (l.frozen ? 1 : 0) | (l.locked ? 4 : 0)); w(62, c); w(6, layerLt.get(l.name));
+    w(0, 'LAYER'); w(2, layerName(l.name)); w(70, (l.frozen ? 1 : 0) | (l.newVpFrozen ? 2 : 0) | (l.locked ? 4 : 0)); w(62, c); w(6, layerLt.get(l.name));
     if (l.plot === false) note('noplot');
   }
   if (add3dLayer) { w(0, 'LAYER'); w(2, layerName(m3.layer)); w(70, 0); w(62, 8); w(6, 'CONTINUOUS'); }
@@ -913,6 +993,16 @@ export function writeDxf(doc) {
   w(0, 'STYLE'); w(2, 'STANDARD'); w(70, 0); w(40, '0.0'); w(41, '1.0'); w(50, '0.0'); w(71, 0); w(42, f(doc.current.textHeight)); w(3, 'txt'); w(4, '');
   for (const [n, v] of textStyleOut) { w(0, 'STYLE'); w(2, n); w(70, 0); w(40, f(v.h || 0)); w(41, f(v.wf || 1)); w(50, f(deg(v.obl || 0))); w(71, 0); w(42, f(doc.current.textHeight)); w(3, encodeText(v.font || 'txt')); w(4, ''); }
   w(0, 'ENDTAB');
+  // named UCSs (DR.8)
+  const ucsNamed = (doc.ucsNamed || []).filter((u) => u && u.name);
+  if (ucsNamed.length) {
+    w(0, 'TABLE'); w(2, 'UCS'); w(70, ucsNamed.length);
+    for (const u of ucsNamed) {
+      const a = u.ang || 0;
+      w(0, 'UCS'); w(2, layerName(u.name)); w(70, 0); w(10, f(u.x)); w(20, f(u.y)); w(30, '0.0'); w(11, f(Math.cos(a))); w(21, f(Math.sin(a))); w(31, '0.0'); w(12, f(-Math.sin(a))); w(22, f(Math.cos(a))); w(32, '0.0');
+    }
+    w(0, 'ENDTAB');
+  }
   // named views (a sheet's one as a paper-space view: R12 does not say which sheet)
   const views = (doc.views || []).filter((v) => v && v.name && v.w > 0 && v.h > 0);
   if (views.length) {
@@ -998,10 +1088,15 @@ export function writeDxf(doc) {
   w(0, 'EOF');
 
   if (report.counts.renamed) report.notes.push(t('dxf.save.renamed', { n: report.counts.renamed }));
+  if (report.counts.infinite) report.notes.push(t('dxf.save.infinite', { n: report.counts.infinite }));
+  { const n = [...doc.model.values(), ...doc.layouts.flatMap((l) => [...l.entities.values()])].filter((e) => e.type === 'insert' && e.clip?.pts?.length >= 3).length; if (n) report.notes.push(t('dxf.save.xclip', { n })); }   // WL.16: R12 has no clips
+  { const n = doc.layouts.reduce((k, l) => k + [...l.entities.values()].filter((e) => e.type === 'viewport' && e.lov && Object.keys(e.lov).length).length, 0); if (n) report.notes.push(t('dxf.save.vpovr', { n })); }   // VP.3: DWG only
+  { const n = pictureRefs(doc); if (n) report.notes.push(t('dxf.save.pictures', { n })); }   // R12 has no pictures: their frames (0.5 WL.14)
   if (report.counts.truecolor) report.notes.push(t('dxf.true_colours_were_saved'));
   if (report.counts.hatch) report.notes.push(t('dxf.save.hatch', { n: report.counts.hatch }));
   if (report.counts.ellipse) report.notes.push(t('dxf.save.ellipse', { n: report.counts.ellipse }));
   if (report.counts.mtext) report.notes.push(t('dxf.multi_line_text_was'));
+  if (report.counts.textmask) report.notes.push(t('dxf.save.textmask', { n: report.counts.textmask }));
   if (report.counts.longattr) report.notes.push(t('dxf.save.longattr', { n: report.counts.longattr }));
   if (report.counts.noplot) report.notes.push(t(first ? 'dxf.save.noplot' : 'dxf.save.noplot_nolayout', { n: report.counts.noplot, layers: noPlot.join(', ') }));
   if (extraLayouts.length) report.notes.push(t('dxf.save.layouts', { n: extraLayouts.length, first: first.name, layouts: extraLayouts.map((x) => '"' + x.l.name + '"').join(', '), blocks: extraLayouts.map((x) => x.name).join(', ') }));
@@ -1025,6 +1120,11 @@ export function writeDxf(doc) {
     // R12 layers cannot say "do not plot": CadCraft keeps the list here
     if (noPlot.length) { w(1000, 'NOPLOT'); for (const n of noPlot) w(1000, n); }
   }
+  /** A viewport's frozen layers (VP.1) under their R12 names, only those the file has. */
+  function frzNames(e) {
+    const have = new Set([...doc.layers.keys()].map((n) => String(n).toUpperCase()));
+    return [...new Set((Array.isArray(e.frz) ? e.frz : []).filter((n) => typeof n === 'string' && have.has(n.toUpperCase())).map((n) => layerName(n)))];
+  }
   function viewport(e, id, extra) {
     w(0, 'VIEWPORT'); w(8, layerName(e.layer || '0'));
     const c = colorCode(e.color); if (c !== null) w(62, c);
@@ -1033,11 +1133,11 @@ export function writeDxf(doc) {
     w(1001, 'ACAD'); w(1000, 'MVIEW'); w(1002, '{'); w(1070, 16);
     w(1010, '0.0'); w(1020, '0.0'); w(1030, '0.0');
     w(1010, '0.0'); w(1020, '0.0'); w(1030, '1.0');
-    w(1040, '0.0'); w(1040, f(e.h / e.s)); w(1040, f(e.cx)); w(1040, f(e.cy));
+    w(1040, f(Number.isFinite(e.tw) ? e.tw : 0)); w(1040, f(e.h / e.s)); w(1040, f(e.cx)); w(1040, f(e.cy));   // twist (radians, DR.8), height, centre
     w(1040, '50.0'); w(1040, '0.0'); w(1040, '0.0');
     w(1070, 0); w(1070, 100); w(1070, 1); w(1070, 3); w(1070, 0); w(1070, 0); w(1070, 0); w(1070, 0);
     w(1040, '0.0'); w(1040, '0.0'); w(1040, '0.0'); w(1040, '1.0'); w(1040, '1.0'); w(1040, '1.0'); w(1040, '1.0');
-    w(1070, 0); w(1002, '{'); w(1002, '}'); w(1002, '}');
+    w(1070, 0); w(1002, '{'); for (const n of frzNames(e)) w(1003, n); w(1002, '}'); w(1002, '}');   // the layers frozen in it (VP.1)
     if (extra) extra();
     else if (e.locked) { w(1001, 'CADCRAFT'); w(1000, 'CCVPLOCK'); }   // display locked (P.7): R12 has no flag for it
   }
@@ -1161,6 +1261,13 @@ export function writeDxf(doc) {
   }
   function entity(e, o) {
     switch (e.type) {
+      case 'xline': case 'ray': {
+        const tt = clipInfinite({ x: e.x, y: e.y }, { x: e.dx, y: e.dy }, drawingExtents(), e.type === 'ray');
+        note('infinite');
+        if (!tt || !(tt[1] > tt[0])) break;
+        const a = { x: e.x + e.dx * tt[0], y: e.y + e.dy * tt[0] }, b = { x: e.x + e.dx * tt[1], y: e.y + e.dy * tt[1] };
+        head('LINE', e, o); w(10, f(a.x)); w(20, f(a.y)); w(30, '0.0'); w(11, f(b.x)); w(21, f(b.y)); w(31, '0.0'); grow(a.x, a.y, o); grow(b.x, b.y, o); xd(e, o); break;
+      }
       case 'line': head('LINE', e, o); w(10, f(e.x1)); w(20, f(e.y1)); w(30, zf(e.z1)); w(11, f(e.x2)); w(21, f(e.y2)); w(31, zf(e.z2)); grow(e.x1, e.y1, o); grow(e.x2, e.y2, o); xd(e, o); break;
       case 'point': head('POINT', e, o); w(10, f(e.x)); w(20, f(e.y)); w(30, zf(e.z)); grow(e.x, e.y, o); xd(e, o); break;
       case 'circle': head('CIRCLE', e, o); w(10, f(e.cx)); w(20, f(e.cy)); w(30, zf(e.z)); w(40, f(e.r)); grow(e.cx - e.r, e.cy - e.r, o); grow(e.cx + e.r, e.cy + e.r, o); xd(e, o); break;
@@ -1183,6 +1290,7 @@ export function writeDxf(doc) {
         break;
       }
       case 'text': {
+        if (e.bgm) note('textmask');   // R12 has no background mask (WL.8)
         const lay = textLayout(e);
         if (lay.lines.length === 1) { textOut(e, e.s, e.x, e.y, o); grow(e.x, e.y, o); break; }
         note('mtext');
@@ -1209,7 +1317,10 @@ export function writeDxf(doc) {
       case 'dim': dimension(e, o); break;
       case 'viewport': {
         // a viewport outside the first layout's paper space: kept as its frame, with its view in CadCraft's xdata
-        polyline(e, viewportCorners(e).map((p) => ({ ...p, b: 0 })), true, o, () => { w(1001, 'CADCRAFT'); w(1000, 'VIEWPORT'); w(1040, f(e.cx)); w(1040, f(e.cy)); w(1040, f(e.s)); });
+        polyline(e, viewportCorners(e).map((p) => ({ ...p, b: 0 })), true, o, () => {
+          w(1001, 'CADCRAFT'); w(1000, 'VIEWPORT'); w(1040, f(e.cx)); w(1040, f(e.cy)); w(1040, f(e.s));
+          const fz = frzNames(e); if (fz.length) { w(1000, 'FRZ'); for (const n of fz) w(1000, n); }   // the layers frozen in it (VP.1)
+        });
         break;
       }
       case 'mleader':

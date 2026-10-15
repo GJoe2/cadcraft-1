@@ -9,13 +9,17 @@
  *
  *   const v = new View3D(glCanvas, overCanvas, {model, cam, ui});
  *   v.style = {mode: 'shaded'|'hidden'|'wire'|'xray', edges, shadows, sun: {…}};  v.invalidate();
+ *   v.textures = {material(key) → THREE.Material | null, uv(p, n) → [u, v]}   textures in the shaded style (0.5 RC.7 /
+ *                RC.11 (b); ModelCraft sets it): key 'mat:<id>' a library material (UVs from uv()), 'img:<id>' an imported
+ *                image (UVs from the face's own placement in its paint); without the hook they show their colour
+ *   v.drawExtra = (g, project(p) → [x, y, depth] | null, colours) => …   the app's own marks on the overlay (lamps)
  * `ui()` returns {path, sel, overlay, guidesOn, dimsOn, present} at draw time. present (0.4 M28, presentation view): no axes,
  * guides, guide points, open-group box, inference marks, hover or selection highlight — only the model (and its dimensions).
  * Colours come from the page tokens (paper/model themes).
  */
 import * as THREE from 'three';
 import { add, sub, mul, dot, norm, apply, invert, dist, bboxAdd } from './vec.js';
-import { faceTris, faceNormal, edgeFaces, smoothNormals } from './model.js';
+import { faceTris, faceNormal, edgeFaces, smoothNormals, paintHex, isMaterialPaint, isImagePaint, imageId, imageUV } from './model.js';
 import { sunPosition } from './sun.js';
 import { dimLayout, dimTextBox, dimText, sectionLayout } from './infer.js';
 import { formatLength } from './units.js';
@@ -102,14 +106,28 @@ export class View3D {
     const key = def.id + '|' + (dflt || '');
     let g = this.cache.get(key);
     if (g && g.version === this.model.version) return g;
-    if (g) { g.faces?.dispose(); g.edges?.dispose(); }
+    if (g) { g.faces?.dispose(); g.edges?.dispose(); for (const x of g.mats || []) x.geometry.dispose(); }
     const pos = [], nor = [], col = [], faceOf = [];
-    const front = new THREE.Color(dflt || this.c.front);
+    const front = new THREE.Color(paintHex(dflt) || this.c.front);
+    const tex = this.textures, byMat = new Map();   // 0.5 RC.7: faces painted with a library material, one mesh per material
     const smooth = smoothNormals(def);   // 0.4 M18: faces joined by soft edges shade as one surface
     for (const [fid, f] of def.faces) {
       if (f.hidden) continue;   // 0.4 M17
       const n = faceNormal(def, f);
-      const c = f.color ? new THREE.Color(f.color) : front;
+      const c = f.color ? new THREE.Color(paintHex(f.color)) : front;
+      const paint = f.color || dflt;
+      const tkey = isMaterialPaint(paint) ? paint : isImagePaint(paint) ? 'img:' + imageId(paint) : null;
+      if (tex && tkey && tex.material(tkey)) {
+        let b = byMat.get(tkey);
+        if (!b) { b = { pos: [], nor: [], col: [], uv: [] }; byMat.set(tkey, b); }
+        const img = tkey.startsWith('img:');
+        for (const t of faceTris(def, f)) for (const v of t) {
+          const p = def.verts.get(v), q = smooth.get(fid + '|' + v) || n, w = img ? imageUV(paint, p) : tex.uv(p, n);
+          b.pos.push(p[0], p[1], p[2]); b.nor.push(q[0], q[1], q[2]); b.col.push(c.r, c.g, c.b); b.uv.push(w[0], w[1]);
+        }
+        faceOf.push(fid);
+        continue;
+      }
       for (const t of faceTris(def, f)) for (const v of t) {
         const p = def.verts.get(v), q = smooth.get(fid + '|' + v) || n;
         pos.push(p[0], p[1], p[2]); nor.push(q[0], q[1], q[2]); col.push(c.r, c.g, c.b);
@@ -128,7 +146,15 @@ export class View3D {
     }
     const edges = new THREE.BufferGeometry();
     edges.setAttribute('position', new THREE.Float32BufferAttribute(ep, 3));
-    g = { version: this.model.version, faces, edges, hasFaces: pos.length > 0 };
+    const mats = [...byMat].map(([paint, b]) => {
+      const mg = new THREE.BufferGeometry();
+      mg.setAttribute('position', new THREE.Float32BufferAttribute(b.pos, 3));
+      mg.setAttribute('normal', new THREE.Float32BufferAttribute(b.nor, 3));
+      mg.setAttribute('color', new THREE.Float32BufferAttribute(b.col, 3));
+      mg.setAttribute('uv', new THREE.Float32BufferAttribute(b.uv, 2));
+      return { id: paint, geometry: mg };   // 'mat:<id>' | 'img:<id>'
+    });
+    g = { version: this.model.version, faces, edges, mats, hasFaces: pos.length > 0 || mats.length > 0 };
     this.cache.set(key, g);
     return g;
   }
@@ -175,6 +201,16 @@ export class View3D {
         parent.add(f);
         if (cut && st.mode !== 'xray' && this.closedDef(def, g)) solids.push(f);
         if (m.back) { const b = new THREE.Mesh(g.faces, m.back); b.castShadow = false; b.receiveShadow = st.shadows; parent.add(b); }
+        // library materials (0.5 RC.7): textured in the shaded style of the open context; elsewhere drawn like other faces
+        const closed = cut && st.mode !== 'xray' && this.closedDef(def, g);
+        for (const x of g.mats || []) {
+          const textured = active && st.mode === 'shaded' ? this.textures?.material(x.id) : null;
+          const tm = new THREE.Mesh(x.geometry, textured || m.front);
+          tm.castShadow = st.shadows; tm.receiveShadow = st.shadows;
+          parent.add(tm);
+          if (closed) solids.push(tm);
+          if (m.back) { const b = new THREE.Mesh(x.geometry, m.back); b.castShadow = false; b.receiveShadow = st.shadows; parent.add(b); }
+        }
       }
       if (st.edges || st.mode === 'wire') parent.add(new THREE.LineSegments(g.edges, m.edge));
       for (const [iid, inst] of def.insts) {
@@ -189,7 +225,7 @@ export class View3D {
     };
     addDef(this.model.root, this.root, [], 0);
     if (cut && solids.length) this.addCaps(solids, cut);
-    for (const [id, g] of this.cache) if (!live.has(id)) { g.faces.dispose(); g.edges.dispose(); this.cache.delete(id); }
+    for (const [id, g] of this.cache) if (!live.has(id)) { g.faces.dispose(); g.edges.dispose(); for (const x of g.mats || []) x.geometry.dispose(); this.cache.delete(id); }
     this.root.updateMatrixWorld(true);
     this.buildExtras(u);
     this.updateLights();
@@ -382,6 +418,8 @@ export class View3D {
     if (u.dimsOn !== false) for (const dm of this.model.dims?.values() || []) this.drawDim(g, dimLayout(this.model, dm, this.cam, vp), this.c.ink, 1.25);
     // section planes (0.4 M7): an outline with arrows toward the side cut away; not in presentation view
     if (!u.present && this.model.sectionView?.planes !== false) for (const [id, s] of this.model.sections || []) this.drawSection(g, sectionLayout(this.model, s), id === this.model.activeSection ? this.c.section : this.c.ink2, id === this.model.activeSection ? 1.75 : 1.25, vp);
+    // the app's own marks (0.5 RC.11 (d): ModelCraft's lamps), not in presentation view: drawExtra(g, project, colours)
+    if (!u.present && this.drawExtra) this.drawExtra(g, (p) => this.cam.project(p, vp), this.c);
     // selection
     if (!u.present) this.drawSel(g, u.sel, ctx, line, this.c.sel, 2.5);
     // presentation view: a tool's own preview still draws (so drawing works), its inference marks and tips do not

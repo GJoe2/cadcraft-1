@@ -43,9 +43,10 @@ import { DIM_EXTRA, ARROWS, TOL_MODES, dimStyleText } from './dimstyle.js';
 import { PATTERNS } from './hatch.js';
 import { LUNITS } from './units.js';
 import { t } from './i18n.js';
+import { visibilityOf, setVisibility } from './dyn-blocks.js';
 
 export const VARIES = Symbol('varies');
-export const SECTIONS = ['general', 'geometry', 'text', 'lines', 'fit', 'units', 'alt', 'tol', 'pattern', 'misc'];
+export const SECTIONS = ['general', 'geometry', 'custom', 'text', 'lines', 'fit', 'units', 'alt', 'tol', 'pattern', 'misc'];
 
 export class PropError extends Error { constructor(key, vars) { super(t(key, vars)); this.key = key; } }
 
@@ -55,6 +56,47 @@ export const pointLabel = (name) => t(PT_LABEL[name] || 'props.pt.pos');
 /** A number field written back: absent when it equals its default (keeps entities and files small). */
 const put = (e, k, v, dflt = 0) => { const n = { ...e }; if (v === dflt || v === undefined || v === null) delete n[k]; else n[k] = v; return n; };
 const num0 = (v) => (Number.isFinite(v) ? v : 0);
+
+// ---------------------------------------------------------------------------- dynamic block references (0.5 DB.3)
+// Properties › Custom: the visibility state as a list (switching = dyn-blocks.js setVisibility, cad-files' DB.4: the
+// reference moves to the copy that shows that state, in the same undo step), and every other parameter value the file
+// holds, read-only: linear distance, alignment angle, flip, point / base point (docs/DWG-DYNAMIC-BLOCKS.md). Lookups,
+// XY, rotation and polar are not decoded yet (no sample), so they are not listed.
+const dynDef = (doc, e) => { const B = doc?.blocks.get(e.block); return B?.dyn ? (B.dyn.def ? B : doc.blocks.get(B.dyn.of)) : null; };
+const isDynamic = (doc, e) => !!dynDef(doc, e);
+const sameDef = (c) => (e) => { const a = dynDef(c.doc, e), b = dynDef(c.doc, c.ents[0]); return !!a && a === b; };
+function dynamicDefs(ctx) {
+  const c = ctx, out = [];
+  const e0 = c.ents?.[0];
+  const def = e0 && dynDef(c.doc, e0);
+  if (!def) return out;
+  const vis = visibilityOf(c.doc, e0);
+  if (vis) {
+    out.push({ key: 'dyn.vis', sec: 'custom', kind: 'choice', label: vis.label || t('props.f.dyn.vis'), title: 'props.f.dyn.vis.title', when: (e) => sameDef(c)(e) && !!visibilityOf(c.doc, e),
+      choices: () => vis.states.map((n) => [n, n]),
+      get: (e) => visibilityOf(c.doc, e)?.current ?? '',
+      set: (e, v, cc) => {
+        if (visibilityOf(cc.doc, e)?.current === v) return e;
+        const r = setVisibility(cc.doc, e.id, v);
+        if (!r.ok) throw new PropError('props.dyn.err.' + r.error);
+        return cc.doc.get(e.id);
+      } });
+  }
+  const names = new Map((def.dyn.params || []).map((p) => [p.node, p]));
+  for (const v of (e0.dyn?.values || [])) {
+    if (v.kind === 'visibility') continue;
+    const p = names.get(v.node), name = p?.name || t('props.dyn.kind.' + v.kind);
+    const pick = (e) => (e.dyn?.values || []).find((x) => x.node === v.node);
+    const base = { sec: 'custom', when: sameDef(c), title: 'props.dyn.ro.title' };
+    if (v.kind === 'linear' && Number.isFinite(v.distance)) out.push({ ...base, key: 'dyn.' + v.node, kind: 'ro-len', label: name, get: (e) => pick(e)?.distance ?? VARIES });
+    else if (v.kind === 'alignment' && Number.isFinite(v.angle)) out.push({ ...base, key: 'dyn.' + v.node, kind: 'ro', label: name, get: (e) => (pick(e) ? (+deg(normAngle(pick(e).angle)).toFixed(4)) + '°' : VARIES) });
+    else if (v.kind === 'flip' && v.flipped !== undefined) out.push({ ...base, key: 'dyn.' + v.node, kind: 'ro', label: name, get: (e) => (pick(e) ? t(pick(e).flipped ? 'props.dyn.flipped' : 'props.dyn.not_flipped') : VARIES) });
+    else if ((v.kind === 'point' || v.kind === 'basepoint') && v.point) {
+      for (const a of ['x', 'y']) out.push({ ...base, key: 'dyn.' + v.node + '.' + a, kind: 'ro-len', label: name + ' ' + t('props.f.' + a), get: (e) => pick(e)?.point?.[a] ?? VARIES });
+    }
+  }
+  return out;
+}
 
 // ---------------------------------------------------------------------------- general (every type)
 
@@ -210,7 +252,8 @@ const TYPES = {
     { key: 'us', sec: 'geometry', kind: 'num', title: 'props.f.us.title', get: (e) => (uniform(e) ? e.sx ?? 1 : VARIES),
       set: (e, v) => { if (!v) throw new PropError('props.err.zero'); return put({ ...e, sx: v, sy: v }, 'sz', v, 1); } },
     { key: 'nents', sec: 'geometry', kind: 'ro', get: (e) => String(ctx.doc?.blocks.get(e.block)?.entities.length || 0) },
-    { key: 'dyn', sec: 'misc', kind: 'ro', get: () => t('props.dyn.none'), title: 'props.dyn.title' },
+    { key: 'dyn', sec: 'misc', kind: 'ro', when: (e) => !isDynamic(ctx.doc, e), get: () => t('props.dyn.none'), title: 'props.dyn.title' },
+    ...dynamicDefs(ctx),
   ],
   hatch: () => [
     { key: 'pattern', sec: 'pattern', kind: 'choice', when: (e) => !e.patlines?.length && (e.solid || !e.pattern || !!PATTERNS[String(e.pattern).toUpperCase()]),
@@ -247,6 +290,7 @@ const TYPES = {
       set: (e, v) => { if (e.locked) throw new PropError('props.err.vplocked'); return { ...e, [k]: v }; } })),
     { key: 'on', sec: 'misc', kind: 'bool', get: (e) => e.on !== false, set: (e, v) => put(e, 'on', v ? undefined : false) },
     { key: 'locked', sec: 'misc', kind: 'bool', title: 'props.f.locked.title', get: (e) => !!e.locked, set: (e, v) => put(e, 'locked', v ? true : undefined) },
+    { key: 'vname', sec: 'misc', kind: 'text', title: 'props.f.vname.title', get: (e) => e.vname || '', set: (e, v) => put(e, 'vname', String(v || '').trim().slice(0, 255) || undefined, undefined) },   // WL.11: view labels show it
   ],
   dim: (ctx) => dimDefs(ctx),
 };

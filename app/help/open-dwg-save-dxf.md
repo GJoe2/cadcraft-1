@@ -30,7 +30,6 @@ The box lists:
 
 - **Not shown yet:** objects CadCraft cannot draw yet, by kind and count. They are left out, not guessed at.
 - **Layouts (sheets) came in:** open them with the tabs under the drawing.
-- **Twisted viewports:** shown square to the sheet.
 - **Splines converted to polylines**, and dimensions that could only be read as drawn.
 
 3. Click through the tabs under the drawing to see each sheet.

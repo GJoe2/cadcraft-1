@@ -29,6 +29,11 @@
  *   moveSheet(set, id, { subset, at }) · updateSheet(set, id, patch) · addSubset(set, name, { parent }) ·
  *   renameSubset(set, id, name) · removeSubset(set, id) (its sheets move up) · renumber(set, ids, { prefix, start, step,
  *   digits }) · setProperties(set, props)
+ *   Numbering from fields (0.5 WL.10): set.numbering = { rule: '{DISCIPLINE}-{LEVEL}{SEQ:2}', start: 1, auto: true }.
+ *   numberByRule(set, numbering?) → a new set, every sheet numbered by the rule: {FIELD} from the sheet's own properties,
+ *   then the set's, then SUBSET (the subset the sheet is in); {SEQ} / {SEQ:n} counts up from `start` among the sheets whose
+ *   other fields read the same (A-1 01, A-1 02, A-2 01 …), in set order. ruleProblem(rule) → a key | null. With `auto`,
+ *   the panel renumbers after every edit, so changing a sheet's DISCIPLINE or LEVEL renumbers it.
  *   Fields (Z.3): FIELD_NAMES · fieldValues(set, sheet) → { SHEETNUMBER, SHEETTITLE, … } · fillTitleBlocks(doc, layout,
  *   values) → how many attributes changed (one undo step) · fieldTag(tag) → the field a title-block attribute tag means
  *   Sheet list (Z.6): sheetListEntities(set) · placeSheetList(doc, layout, set) · refreshSheetList(doc, set) — the table
@@ -120,6 +125,7 @@ export function readSheetSet(text) {
     layoutNames: LAYOUT_NAMES.includes(o.layoutNames) ? o.layoutNames : 'number-title',
     template: o.template && cleanPath(o.template.file) && str(o.template.layout) ? { file: cleanPath(o.template.file), layout: str(o.template.layout) } : null,
     sheets: sheets(o.sheets), subsets: subsets(o.subsets, 1),
+    ...(cleanNumbering(o.numbering) ? { numbering: cleanNumbering(o.numbering) } : {}),
   };
   if (dropped) notes.push(t('sheetset.read.dropped', { n: dropped }));
   return { set, notes };
@@ -131,7 +137,7 @@ export function writeSheetSet(set) {
   const sub = (g) => ({ id: g.id, name: g.name, sheets: g.sheets.map(sheet), ...(g.subsets.length ? { subsets: g.subsets.map(sub) } : {}) });
   return JSON.stringify({
     format: FORMAT, version: VERSION, name: set.name, properties: set.properties || {}, layoutNames: set.layoutNames || 'number-title',
-    ...(set.template ? { template: set.template } : {}), sheets: set.sheets.map(sheet), subsets: set.subsets.map(sub),
+    ...(set.template ? { template: set.template } : {}), ...(set.numbering ? { numbering: set.numbering } : {}), sheets: set.sheets.map(sheet), subsets: set.subsets.map(sub),
   }, null, 2) + '\n';
 }
 
@@ -258,6 +264,46 @@ export function renumber(set, ids = null, { prefix = '', start = 1, step = 1, di
     if (want && !want.has(sheet.id)) continue;
     sheet.number = str(prefix + String(k).padStart(Math.max(0, digits | 0), '0'));
     k += Number.isFinite(+step) && +step ? +step : 1;
+  }
+  return n;
+}
+// ---------------------------------------------------------------------------- numbering from fields (0.5 WL.10)
+
+const TOKEN = /\{([A-Za-z][A-Za-z0-9_]{0,40})(?::(\d{1,2}))?\}/g;
+/** Why a rule can't be used ('sheetset.rule.empty' | '.seq' | '.long'), or null. */
+export function ruleProblem(rule) {
+  const r = String(rule ?? '').trim();
+  if (!r) return 'sheetset.rule.empty';
+  if (r.length > 120) return 'sheetset.rule.long';
+  if (![...r.matchAll(TOKEN)].some((m) => m[1].toUpperCase() === 'SEQ')) return 'sheetset.rule.seq';
+  return null;
+}
+/** A set's numbering as data, or null. */
+export function cleanNumbering(v) {
+  if (!v || typeof v !== 'object' || ruleProblem(v.rule)) return null;
+  const start = Number.isFinite(+v.start) ? Math.max(0, Math.min(1e6, Math.round(+v.start))) : 1;
+  return { rule: String(v.rule).trim(), start, auto: !!v.auto };
+}
+/** Every sheet numbered by the rule (see the header). Sheets keep their number when the rule can't be used. */
+export function numberByRule(set, numbering = set.numbering) {
+  const nb = cleanNumbering(numbering);
+  if (!nb) return set;
+  const n = clone(set);
+  n.numbering = nb;
+  const seq = new Map();
+  for (const { sheet, path } of allSheets(n)) {
+    const field = (name) => {
+      const k = name.toUpperCase();
+      if (k === 'SUBSET') return path.length ? path[path.length - 1].name : '';
+      const own = Object.entries(sheet.properties || {}).find(([x]) => x.toUpperCase() === k);
+      if (own) return String(own[1]);
+      const setv = Object.entries(n.properties || {}).find(([x]) => x.toUpperCase() === k);
+      return setv ? String(setv[1]) : '';
+    };
+    const key = nb.rule.replace(TOKEN, (m, name) => (name.toUpperCase() === 'SEQ' ? '\u0000' : field(name)));
+    const k = (seq.get(key) ?? nb.start - 1) + 1;
+    seq.set(key, k);
+    sheet.number = str(nb.rule.replace(TOKEN, (m, name, w) => (name.toUpperCase() === 'SEQ' ? String(k).padStart(+w || 0, '0') : field(name))));
   }
   return n;
 }

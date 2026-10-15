@@ -6,7 +6,8 @@
  *   line {x1,y1,x2,y2} · circle {cx,cy,r} · arc {cx,cy,r,a0,a1} · poly {pts:[{x,y,b}], closed}
  *   ellipse {cx,cy,mx,my,ratio,t0,t1} · text {x,y,h,rot,s,ha,va} · point {x,y}
  *   insert {block,x,y,sx,sy,rot, attrs?:{TAG: value}, attloc?} · hatch {loops:[[x,y,…]], solid} · dim (see dims.js)
- *   viewport {x,y,w,h, cx,cy, s}   (layouts only: a window on the model; s = paper units per model unit)
+ *   viewport {x,y,w,h, cx,cy, s, frz?}   (layouts only: a window on the model; s = paper units per model unit; frz = names
+ *                                          of the layers frozen in this viewport, 0.5 VP.1)
  * plus `id`, `layer` and `color` (null = by layer, 0 = by block, 1–255 = ACI, '#rrggbb').
  *
  * Spaces: `model` holds the drawing; each layout (sheet) in `layouts` holds its own paper-space
@@ -22,6 +23,7 @@ import { DIM_DEFAULTS } from './dims.js';
 import { afterEdit, resolveParametric } from './gcons.js';
 import { Model3D, split3d } from './model3d.js';
 import { cleanPanes } from './panes.js';
+import { cleanUcs, ucsData, UCS_NAME_RE } from './ucs.js';
 
 import { t } from './i18n.js';
 // Constraints and parameters (gcons.js, params-doc.js): doc.constraints [] and doc.params {vars, links} are part
@@ -40,6 +42,10 @@ export class Doc {
     this.layouts = [];              // [{ name, paper: {w, h, unit: 'mm'|'in', x0, y0, key?}, entities: Map }]
     this.vports = null;             // split screen to save (panes.js cleanPanes shape: { layout, fx, fy, active, list: [{ cx, cy, h, sheet? }] }; the VPORT table)
     this.views = [];                // named views [{ name, cx, cy, w, h, layout? }] (NAMEDVIEW; the file's VIEW table)
+    this.ucs = null;                // the current UCS { x, y, ang } (ucs.js; null = world) — not an edit: no undo, no unsaved mark (DR.8)
+    this.ucsPrev = [];              // UCS Previous (this session)
+    this.ucsNamed = [];             // saved UCSs [{ name, x, y, ang }] (UCS NA; the file's UCS table)
+    this.viewTwist = 0;             // one pane's view turn to save / opened (radians; the active VPORT's twist, DR.8); split screen: doc.vports[].tw
     this.blockEdit = null;          // the block editor (BEDIT): { name, map, base, mark, from } while it is open
     this.layers = new Map();        // name → { name, color, on, frozen, locked, plot, linetype, lineweight } (linetypes.js)
     this.linetypes = new Map();     // name → { name, description, pattern } that a file brought (linetypes.js; standard ones built in)
@@ -59,6 +65,7 @@ export class Doc {
     this.params = { vars: [], links: [] };   // params.js
     this.solving = false;           // gcons/params-doc are writing a solved state: no re-solve
     this.onNote = null;             // (message) → void: constraints said something about an edit
+    this.liveHook = null;           // Studio Live (0.5 LV.8, live.js): hears each step, routes undo/redo; moves with the drawing in swapContent
     this.addLayer({ name: '0', color: 7 });
     this.model3d = new Model3D(this);   // the 3D model (model3d.js): its edits are ops { m3d } in this history
   }
@@ -86,6 +93,7 @@ export class Doc {
     }
     if (this.model3d) this.model3d.doc = this;
     if (other.model3d) other.model3d.doc = other;
+    this.liveHook?.moved(this); other.liveHook?.moved(other);
     this.emit('load');
   }
 
@@ -110,7 +118,8 @@ export class Doc {
   // ---- layers ----
   addLayer(l) {
     const layer = { name: l.name, color: l.color ?? 7, on: l.on ?? true, frozen: !!l.frozen, locked: !!l.locked, plot: l.plot ?? true,
-      linetype: typeof l.linetype === 'string' && l.linetype ? l.linetype : 'Continuous', lineweight: Number.isFinite(l.lineweight) ? l.lineweight : -3 };
+      linetype: typeof l.linetype === 'string' && l.linetype ? l.linetype : 'Continuous', lineweight: Number.isFinite(l.lineweight) ? l.lineweight : -3,
+      ...(l.newVpFrozen ? { newVpFrozen: true } : {}) };   // frozen in new viewports (VP.2: MVIEW freezes it in the viewports it makes)
     this.layers.set(layer.name, layer);
     return layer;
   }
@@ -150,7 +159,10 @@ export class Doc {
       if (current) { l.on = true; l.frozen = false; state.current = l.name; }
       if (rename) {
         if (state.current === name) state.current = rename;
-        for (const map of [this.model, ...this.layouts.map((x) => x.entities)]) for (const e of [...map.values()]) if (e.layer === name) this.update(e.id, { ...e, layer: rename }, map);
+        for (const map of [this.model, ...this.layouts.map((x) => x.entities)]) for (const e of [...map.values()]) {
+          const frz = Array.isArray(e.frz) && e.frz.includes(name) ? e.frz.map((n) => (n === name ? rename : n)) : null;   // frozen in a viewport (VP.1)
+          if (e.layer === name || frz) this.update(e.id, { ...e, ...(e.layer === name ? { layer: rename } : {}), ...(frz ? { frz } : {}) }, map);
+        }
         for (const b of [...this.blocks.values()]) if (b.entities.some((e) => e.layer === name)) this.defineBlock({ ...b, entities: b.entities.map((e) => (e.layer === name ? { ...e, layer: rename } : e)) });
       }
       this.setLayerState(state);
@@ -190,6 +202,7 @@ export class Doc {
       this.undoStack.push(step);
       if (this.undoStack.length > 500) this.undoStack.shift();
       this.redoStack.length = 0;
+      this.liveHook?.step(step);
       this.version++;
       this.emit();
       this.emitLayers();
@@ -229,6 +242,7 @@ export class Doc {
     const after = { name: b.name, base: { x: b.base?.x || 0, y: b.base?.y || 0 }, entities: b.entities.map((e) => { const c = { ...e }; delete c.id; return c; }) };
     if (b.attdefs?.length) after.attdefs = b.attdefs.map((d) => ({ ...d }));
     if (b.xref && typeof b.xref === 'object') after.xref = { ...b.xref };   // a linked drawing (xref.js, 0.4 C35)
+    if (b.dyn && typeof b.dyn === 'object') after.dyn = b.dyn;   // a dynamic block (dyn-blocks.js): saving checks it still lines up
     this.blocks.set(b.name, after);
     this.pending.ops.push({ block: b.name, before, after });
     return after;
@@ -248,6 +262,14 @@ export class Doc {
     for (const k of Object.keys(patch)) before[k] = this.meta[k];
     this.pending.ops.push({ meta: true, before, after: { ...patch } });
     Object.assign(this.meta, patch);
+  }
+  /** Set (or with null remove) one named style: table 'dimStyles' | 'textStyles' (inside a change: undoable; WL.12 copies values with it). */
+  setStyle(table, name, value) {
+    this.mustBeInChange();
+    if (table !== 'dimStyles' && table !== 'textStyles') throw new Error('setStyle: dimStyles or textStyles');   // i18n-ignore: for developers
+    const before = this[table].get(name) || null;
+    this.pending.ops.push({ style: table, name, before, after: value ? { ...value } : null });
+    if (value) this[table].set(name, { ...value }); else this[table].delete(name);
   }
   /** Replace the named views (inside a change: undoable). */
   setViews(list) {
@@ -279,6 +301,7 @@ export class Doc {
       this.current.layer = v.current;
       this.layersMoved = true;
     }
+    else if (op.style) { if (v) this[op.style].set(op.name, { ...v }); else this[op.style].delete(op.name); }   // setStyle
     else if (op.block) { if (v) this.blocks.set(op.block, v); else this.blocks.delete(op.block); }
     else if (v) op.map.set(op.id, v); else op.map.delete(op.id);
   }
@@ -289,24 +312,28 @@ export class Doc {
   squash(mark, label) {
     if (this.undoStack.length - mark < 2) { if (this.undoStack.length > mark) this.undoStack[mark].label = label; return; }
     const steps = this.undoStack.splice(mark);
-    this.undoStack.push({ label, ops: steps.flatMap((s) => s.ops) });
+    this.undoStack.push({ label, ops: steps.flatMap((s) => s.ops), ...(steps.some((s) => s.live) ? { live: true } : {}) });
   }
 
   get canUndo() { return this.undoStack.length > 0; }
   get canRedo() { return this.redoStack.length > 0; }
   undo() {
+    if (this.liveHook) { const r = this.liveHook.undo('undo'); if (r !== undefined) return r; }   // live: your own work, per person
     const step = this.undoStack.pop();
     if (!step) return null;
     this.rollback(step.ops);
     this.redoStack.push(step);
+    this.liveHook?.undone(step, 'undo');
     this.afterHistory();
     return step.label;
   }
   redo() {
+    if (this.liveHook) { const r = this.liveHook.undo('redo'); if (r !== undefined) return r; }
     const step = this.redoStack.pop();
     if (!step) return null;
     for (const op of step.ops) this.apply(op, true);
     this.undoStack.push(step);
+    this.liveHook?.undone(step, 'redo');
     this.afterHistory();
     return step.label;
   }
@@ -331,7 +358,13 @@ export class Doc {
   }
 
   /** Replace everything (open / new). Not undoable; the caller asks about unsaved changes first. */
-  load({ entities = [], layers = [], blocks = [], layouts = [], meta = {}, dimStyle = null, parametric = null, report = null, views = [], linetypes = [], vports = null, textStyles = null, dimStyles = null } = {}) {
+  load({ entities = [], layers = [], blocks = [], layouts = [], meta = {}, dimStyle = null, parametric = null, report = null, views = [], linetypes = [], vports = null, textStyles = null, dimStyles = null, ucs = null, viewTwist = 0 } = {}) {
+    if (this.liveHook) this.liveHook.replaced();   // another drawing replaces the live one here: the session ends for this window
+    this.viewTwist = Number.isFinite(viewTwist) && Math.abs(viewTwist) <= 100 ? viewTwist : 0;
+    // the file's UCS (DR.8, cad-files): { current: {x, y, ang} | null, named: [{ name, x, y, ang }] } — checked like any file data
+    this.ucs = cleanUcs(ucs?.current);
+    this.ucsPrev = [];
+    this.ucsNamed = (Array.isArray(ucs?.named) ? ucs.named : []).map((u) => (u && typeof u.name === 'string' && UCS_NAME_RE.test(u.name) && ucsData(u) ? { name: u.name, ...ucsData(u) } : null)).filter(Boolean).slice(0, 1000);
     const in3d = split3d(arguments[0]);   // 3DFACEs and CadCraft's 3D model (model3d.js) are not 2D objects
     this.vports = cleanPanes(vports);   // split screen the file was saved with (its VPORT table, panes.js shape); cadcraft.js restores it
     this.model.clear(); this.layers.clear(); this.blocks.clear();
@@ -342,7 +375,9 @@ export class Doc {
     this.addLayer({ name: '0', color: 7 });
     for (const l of layers) this.addLayer(l);
     for (const b of blocks) this.blocks.set(b.name, { name: b.name, base: b.base || { x: 0, y: 0 }, entities: b.entities, ...(b.attdefs?.length ? { attdefs: b.attdefs } : {}),
-      ...(b.xref && typeof b.xref === 'object' ? { xref: { path: String(b.xref.path || '').slice(0, 1024) } } : {}) });   // a linked drawing a file names (xref.js)
+      ...(b.xref && typeof b.xref === 'object' ? { xref: { path: String(b.xref.path || '').slice(0, 1024) } } : {}),   // a linked drawing a file names (xref.js)
+      ...(b.dyn && typeof b.dyn === 'object' ? { dyn: b.dyn } : {}) });   // a dynamic block's hidden entities and states (dyn-blocks.js, cad-files 0.5)
+    this.dynSrc = arguments[0]?.dynSrc && Array.isArray(arguments[0].dynSrc.objects) ? arguments[0].dynSrc : null;   // the file's dynamic-block objects (dwg-save.js)
     const fill = (map, list) => {
       for (const e of list) {
         const ent = { color: null, ...e, layer: e.layer || '0', id: this.nextId++ };
@@ -439,6 +474,6 @@ export function typeName(e) {
 }
 
 /** Object type names for people: getters, so they are read in the page's language when used (not at module load). */
-export const TYPE_NAMES = Object.fromEntries(['line', 'circle', 'arc', 'poly', 'ellipse', 'text', 'point', 'insert', 'hatch', 'dim', 'viewport', 'mleader']
+export const TYPE_NAMES = Object.fromEntries(['line', 'circle', 'arc', 'poly', 'ellipse', 'text', 'point', 'insert', 'hatch', 'dim', 'viewport', 'mleader', 'xline', 'ray']
   .map((k) => [k, undefined]));
 for (const k of Object.keys(TYPE_NAMES)) Object.defineProperty(TYPE_NAMES, k, { get: () => t('type.' + k), enumerable: true });

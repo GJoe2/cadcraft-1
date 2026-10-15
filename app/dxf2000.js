@@ -15,6 +15,7 @@
 import { saveDwg } from './dwg-save.js';
 import { t } from './i18n.js';
 import { dimstylePairs, stFromVars } from './dwg-props.js';
+import { pictureRefs } from './pictures.js';
 
 const deg = (r) => (r * 180) / Math.PI;
 const f = (n) => (Number.isFinite(n) ? (Math.abs(n) < 1e-12 ? '0.0' : Number(n.toPrecision(15)).toString()) : '0.0');
@@ -70,6 +71,7 @@ export function writeDxf2000(doc) {
   w(9, '$INSUNITS'); w(70, hd.INSUNITS | 0);
   w(9, '$MEASUREMENT'); w(70, hd.MEASUREMENT ?? 1);
   w(9, '$LUNITS'); w(70, hd.LUNITS || 2);
+  if (hd.UCSORG && hd.UCSXDIR) for (const [k, p] of [['$UCSORG', hd.UCSORG], ['$UCSXDIR', hd.UCSXDIR], ['$UCSYDIR', hd.UCSYDIR || { x: -hd.UCSXDIR.y, y: hd.UCSXDIR.x }]]) { w(9, k); w(10, f(p.x)); w(20, f(p.y)); w(30, '0.0'); }   // the current UCS (DR.8)
   if (Number.isFinite(hd.LUPREC)) { w(9, '$LUPREC'); w(70, hd.LUPREC | 0); }
   w(9, '$LTSCALE'); w(40, f(hd.LTSCALE || 1));
   w(9, '$CLAYER'); w(8, '0');
@@ -91,7 +93,7 @@ export function writeDxf2000(doc) {
       const c = v.center || { x: (e0.x + e1.x) / 2, y: (e0.y + e1.y) / 2 };
       w(10, f(v.lowerLeft.x)); w(20, f(v.lowerLeft.y)); w(11, f(v.upperRight.x)); w(21, f(v.upperRight.y)); w(12, f(c.x)); w(22, f(c.y));
       w(13, '0.0'); w(23, '0.0'); w(14, '1.0'); w(24, '1.0'); w(15, '1.0'); w(25, '1.0'); w(16, '0.0'); w(26, '0.0'); w(36, '1.0'); w(17, '0.0'); w(27, '0.0'); w(37, '0.0');
-      w(40, f(v.viewHeight > 0 ? v.viewHeight : vh0)); w(41, f(v.aspect > 0 ? v.aspect : 1.5)); w(42, '50.0'); w(43, '0.0'); w(44, '0.0'); w(50, '0.0'); w(51, '0.0');
+      w(40, f(v.viewHeight > 0 ? v.viewHeight : vh0)); w(41, f(v.aspect > 0 ? v.aspect : 1.5)); w(42, '50.0'); w(43, '0.0'); w(44, '0.0'); w(50, '0.0'); w(51, f(deg(v.twist || 0)));   // view twist (DR.8)
       w(71, 0); w(72, 1000); w(73, 1); w(74, 3); w(75, 0); w(76, 0); w(77, 0); w(78, 0);
       for (const [app, items] of Object.entries(v.xdata || {})) { w(1001, app.toUpperCase()); for (const [code, x] of items) w(code, code === 1000 ? enc(x) : x); }
     });
@@ -106,11 +108,13 @@ export function writeDxf2000(doc) {
     }
   });
   const ls = model.tables.layers || [];
+  const layerH = new Map();   // upper-case layer name → its handle here
   const hasZero = ls.some((l) => l.name === '0');
   table('LAYER', H.layerT, ls.length + (hasZero ? 0 : 1), () => {
     if (!hasZero) { entry('LAYER', h(), H.layerT, 'AcDbLayerTableRecord', '0'); w(62, 7); w(6, 'Continuous'); w(370, -3); w(390, '0'); }
     for (const l of ls) {
-      entry('LAYER', h(), H.layerT, 'AcDbLayerTableRecord', enc(layerName(l.name)), (l.frozen ? 1 : 0) | (l.locked ? 4 : 0));
+      const lh = h(); layerH.set(String(l.name).toUpperCase(), lh);   // VP.1: viewports name their frozen layers by handle (331)
+      entry('LAYER', lh, H.layerT, 'AcDbLayerTableRecord', enc(layerName(l.name)), (l.frozen ? 1 : 0) | (l.frozenInNewViewports ? 2 : 0) | (l.locked ? 4 : 0));
       const ci = l.color?.index ?? 7;
       w(62, l.off ? -Math.abs(ci || 7) : (ci || 7));
       if (l.color?.rgb !== undefined) w(420, l.color.rgb & 0xffffff);
@@ -138,7 +142,15 @@ export function writeDxf2000(doc) {
       w(42, '50.0'); w(43, '0.0'); w(44, '0.0'); w(50, '0.0'); w(71, 0); w(281, 0); w(72, 0);
     }
   });
-  table('UCS', H.ucsT, 0, () => {});
+  const ucsT = (model.tables.ucs || []).filter((u) => u && u.name && u.origin && u.xAxis);   // named UCSs (DR.8)
+  table('UCS', H.ucsT, ucsT.length, () => {
+    for (const u of ucsT) {
+      entry('UCS', h(), H.ucsT, 'AcDbUCSTableRecord', enc(u.name));
+      const ya = u.yAxis || { x: -u.xAxis.y, y: u.xAxis.x };
+      for (const [c, q] of [[10, u.origin], [11, u.xAxis], [12, ya]]) { w(c, f(q.x || 0)); w(c + 10, f(q.y || 0)); w(c + 20, '0.0'); }
+      w(79, 0); w(146, '0.0');
+    }
+  });
   const appH = new Map([...apps].map((a) => [a, h()]));
   table('APPID', H.appidT, apps.size, () => { for (const [a, ah] of appH) entry('APPID', ah, H.appidT, 'AcDbRegAppTableRecord', a); });
   // dimension styles (P.6): every variable, one for one (dwg-props.js)
@@ -161,8 +173,12 @@ export function writeDxf2000(doc) {
   w(0, 'ENDSEC');
 
   // ---- entities (owner = the block record they live in)
+  const clips = [];   // XCLIP (0.5 WL.16): { own, xd, d2, sf, pts } — written in OBJECTS
   const head = (type, e, owner, paper) => {
-    w(0, type); w(5, h()); w(330, owner); w(100, 'AcDbEntity');
+    const own = h();
+    w(0, type); w(5, own);
+    if (e.xclip?.pts?.length >= 3) { const c = { own, xd: h(), d2: h(), sf: h(), pts: e.xclip.pts }; clips.push(c); w(102, '{ACAD_XDICTIONARY'); w(360, c.xd); w(102, '}'); }
+    w(330, owner); w(100, 'AcDbEntity');
     if (paper) w(67, 1);
     w(8, enc(layerName(e.layer || '0')));
     const lt = ltName(e.linetype);
@@ -197,6 +213,8 @@ export function writeDxf2000(doc) {
       case 'CIRCLE': head('CIRCLE', e, owner, paper); w(100, 'AcDbCircle'); th(e); P(10, e.center); w(40, f(e.radius)); break;
       case 'ARC': head('ARC', e, owner, paper); w(100, 'AcDbCircle'); th(e); P(10, e.center); w(40, f(e.radius)); w(100, 'AcDbArc'); w(50, f(deg(e.startAngle))); w(51, f(deg(e.endAngle))); break;
       case 'POINT': head('POINT', e, owner, paper); w(100, 'AcDbPoint'); P(10, e.position); th(e); break;
+      case 'XLINE': case 'RAY':   // construction lines (0.5 DR.7)
+        head(e.type, e, owner, paper); w(100, e.type === 'XLINE' ? 'AcDbXline' : 'AcDbRay'); P(10, e.start); P(11, e.direction); break;
       case 'LWPOLYLINE': {
         const each = e.vertices.some((v) => v.startWidth || v.endWidth);
         head('LWPOLYLINE', e, owner, paper); w(100, 'AcDbPolyline'); w(90, e.vertices.length); w(70, e.closed ? 1 : 0); w(43, f(each ? 0 : e.constantWidth || 0));
@@ -219,6 +237,10 @@ export function writeDxf2000(doc) {
         for (let i = 0; i + 250 < v.length; i += 250) w(3, v.slice(i, i + 250));
         w(1, v.slice(Math.floor(Math.max(0, v.length - 1) / 250) * 250));
         w(7, e.style ? enc(e.style) : 'Standard'); if (e.xAxis) P(11, e.xAxis); w(44, f(e.lineSpacing || 1));
+        if (e.backgroundFlags & 1) {   // background mask (0.5 WL.8): flags, colour (index + true colour), border offset, transparency
+          const bc = e.backgroundColor || { index: 7 };
+          w(90, e.backgroundFlags); w(63, bc.index ?? 7); if (bc.rgb !== undefined) w(421, bc.rgb & 0xffffff); w(45, f(e.backgroundScale || 1.5)); w(441, e.backgroundTransparency | 0);
+        }
         break;
       }
       case 'ATTDEF':
@@ -276,8 +298,10 @@ export function writeDxf2000(doc) {
         const st = (e.status ?? 32864) >>> 0;
         head('VIEWPORT', e, owner, true); w(100, 'AcDbViewport'); P(10, e.center); w(40, f(e.width)); w(41, f(e.height)); w(68, st & 131072 ? 0 : e.id === 1 ? 1 : 2); w(69, e.id || 2);
         w(12, f(e.viewCenter?.x || 0)); w(22, f(e.viewCenter?.y || 0)); w(13, '0.0'); w(23, '0.0'); w(14, '10.0'); w(24, '10.0'); w(15, '10.0'); w(25, '10.0');
-        w(16, '0.0'); w(26, '0.0'); w(36, '1.0'); w(17, '0.0'); w(27, '0.0'); w(37, '0.0'); w(42, '50.0'); w(43, '0.0'); w(44, '0.0'); w(45, f(e.viewHeight)); w(50, '0.0'); w(51, '0.0');
-        w(72, 1000); w(90, st); w(1, ''); w(281, 0); w(71, 1); w(74, 0); w(110, '0.0'); w(120, '0.0'); w(130, '0.0'); w(111, '1.0'); w(121, '0.0'); w(131, '0.0'); w(112, '0.0'); w(122, '1.0'); w(132, '0.0'); w(79, 0); w(146, '0.0');
+        w(16, '0.0'); w(26, '0.0'); w(36, '1.0'); w(17, '0.0'); w(27, '0.0'); w(37, '0.0'); w(42, '50.0'); w(43, '0.0'); w(44, '0.0'); w(45, f(e.viewHeight)); w(50, '0.0'); w(51, f(deg(e.twist || 0)));   // its twist (DR.8)
+        w(72, 1000);
+        for (const n of e.frozenLayers || []) { const lh = layerH.get(String(n).toUpperCase()); if (lh) w(331, lh); }   // frozen in this viewport (VP.1), where AutoCAD puts them
+        w(90, st); w(1, ''); w(281, 0); w(71, 1); w(74, 0); w(110, '0.0'); w(120, '0.0'); w(130, '0.0'); w(111, '1.0'); w(121, '0.0'); w(131, '0.0'); w(112, '0.0'); w(122, '1.0'); w(132, '0.0'); w(79, 0); w(146, '0.0');
         break;
       }
       default: report.counts.skipped = (report.counts.skipped || 0) + 1; return;
@@ -310,6 +334,15 @@ export function writeDxf2000(doc) {
   dict(H.groups, H.nod, []);
   dict(H.layoutsD, H.nod, layouts.map((L) => [enc(L.name), L.h]));
   dict(H.mlsD, H.nod, [['Standard', H.mls]]);
+  // clipped references (WL.16): xdict → ACAD_FILTER → SPATIAL → SPATIAL_FILTER (block coordinates, identity matrices)
+  for (const c of clips) {
+    dict(c.xd, c.own, [['ACAD_FILTER', c.d2]]);
+    dict(c.d2, c.xd, [['SPATIAL', c.sf]]);
+    w(0, 'SPATIAL_FILTER'); w(5, c.sf); w(102, '{ACAD_REACTORS'); w(330, c.d2); w(102, '}'); w(330, c.d2); w(100, 'AcDbFilter'); w(100, 'AcDbSpatialFilter');
+    w(70, c.pts.length); for (const p of c.pts) { w(10, f(p.x)); w(20, f(p.y)); }
+    w(210, '0.0'); w(220, '0.0'); w(230, '1.0'); w(11, '0.0'); w(21, '0.0'); w(31, '0.0'); w(71, 1); w(72, 0); w(73, 0);
+    for (let k = 0; k < 2; k++) for (let i = 0; i < 12; i++) w(40, i % 5 === 0 ? '1.0' : '0.0');   // 3 × 4 identity, twice
+  }
   w(0, 'MLINESTYLE'); w(5, H.mls); w(330, H.mlsD); w(100, 'AcDbMlineStyle'); w(2, 'Standard'); w(70, 0); w(3, ''); w(62, 256); w(51, '90.0'); w(52, '90.0'); w(71, 2);
   for (const o of [0.5, -0.5]) { w(49, f(o)); w(62, 256); w(6, 'BYLAYER'); }
   for (const L of layouts) {
@@ -329,6 +362,8 @@ export function writeDxf2000(doc) {
   lines[handseedAt] = seed.toString(16).toUpperCase();
 
   if (report.counts.mleader) report.notes.push(t('dxf2000.save.mleader', { n: report.counts.mleader }));
+  { const n = pictureRefs(doc); if (n) report.notes.push(t('dxf.save.pictures', { n })); }
+  { const n = doc.layouts.reduce((k, l) => k + [...l.entities.values()].filter((e) => e.type === 'viewport' && e.lov && Object.keys(e.lov).length).length, 0); if (n) report.notes.push(t('dxf.save.vpovr', { n })); }   // VP.3: DWG only   // DXF keeps pictures as their frames (0.5 WL.14)
   if (report.counts.material) report.notes.push(t('dwg.save.material'));
   if (report.counts.tr2000) report.notes.push(t('dwg.save.tr2000'));
   if (report.counts.xrefBound) report.notes.push(t('dwg.save.xref.bound', { n: report.counts.xrefBound }));

@@ -35,9 +35,11 @@ Aliases: `PL`. One polyline of line and arc segments.
 
 Aliases: `C`.
 
-- `Specify center point for circle [3P/2P]`
+- `Specify center point for circle [3P/2P/Ttr (tan tan radius)]`
 - `Specify radius of circle [Diameter] <last radius>`; `D` asks `Specify diameter of circle`.
 - `2P`: two ends of a diameter. `3P`: three points on the circle.
+- `T` (also the command `TTR`, and {{ui:Draw}} › {{ui:More}} › {{ui:Circle: Tan, Tan, Radius}}): `Specify point on object for first tangent of circle`, the second, then the radius (Enter: the last one). The circle touches both objects (lines, arcs, circles, polyline segments, also inside blocks); of the circles that do, the one touching nearest your picks. "Circle does not exist" when none fits.
+- `TTT` (or {{ui:Draw}} › {{ui:More}} › {{ui:Circle: Tan, Tan, Tan}}): three objects; the circle touching all three, nearest your picks (three lines give the inner circle or an outer one, depending on where you pick).
 
 ### ARC
 
@@ -80,9 +82,22 @@ See [Hatch and fill areas](topic:hatch).
 
 ### POINT
 
-Aliases: `PO`. Point objects, one per click, until Enter.
+Aliases: `PO`; or {{ui:Draw}} › {{ui:More}} › {{ui:Point}}. Point objects, one per click, until Enter.
 
 - `Specify a point`
+
+### XLINE
+
+Aliases: `XL`; or {{ui:Draw}} › {{ui:More}} › {{ui:Construction line}}. Construction lines, endless both ways. See [Construction lines and rays](topic:construction-lines).
+
+- `Specify a point [Hor/Ver/Ang/Bisect/Offset]`, then `Specify through point` for each line, until Enter.
+- `A`: `Enter angle of construction line [Reference] <0>`; `R` asks `Select a line object` first.
+- `B`: `Specify angle vertex point`, `Specify angle start point`, then `Specify angle end point` for each line.
+- `O`: `Specify offset distance [Through] <Through>`, then `Select a line object` and `Specify side to offset` (or `Specify through point`) for each line.
+
+### RAY
+
+No aliases; or {{ui:Draw}} › {{ui:More}} › {{ui:Ray}}. `Specify start point`, then `Specify through point` for each ray, until Enter.
 
 ### TEXT
 
@@ -443,6 +458,14 @@ Aliases: `I`, `DDINSERT`.
 
 Aliases: `LIB`. Opens the library panel: place items, check for updates, library credits. No questions. See [Insert from a file or the library](topic:insert-from-file-and-library).
 
+### STEELMEMBER
+
+Aliases: `SMEMBER`; or {{ui:3D member}} on the library's {{ui:Standard}} tab. `Section size <W12x26>` (as the tab lists it), then `Start point [Column]` and `End point`: a solid member on the 3D tab between the two points, sitting on the ground. `C` asks for the column's base point and its height. One undo step. See [Place steel sections and standard parts](topic:steel-and-standard-parts).
+
+### PARTSLIST
+
+Aliases: `PLIST`. `Top left corner of the parts list`, then `Text height <2.5>`: draws a table of every standard part and steel section placed from the library (item numbers, quantity, part, standard, size, length, material, mass). One undo step. See [Place steel sections and standard parts](topic:steel-and-standard-parts#make-a-parts-list).
+
 ### PURGE
 
 Aliases: `PU`. Removes block definitions that nothing uses. No questions.
@@ -472,6 +495,30 @@ Aliases: `VIEWPORTS`. {{cmd:SPLIT}} is the same from a sheet too, and {{ui:View}
 No aliases. On a sheet only.
 
 - `Select viewport` (skipped if one is selected), then on the model: `Specify first corner of the window to show`, `Specify opposite corner`.
+
+### UCS
+
+No aliases. A coordinate system of your own; not an edit. `Specify origin of UCS [NAmed/OBject/Previous/World/Z/3point] <World>`: a point is a new origin, then `Specify point on X-axis (Enter keeps the angle)`. `Z`: `Specify rotation angle about Z axis <90>`. `3`: origin, a point on the positive X axis, a point on the positive-Y side. `OB`: `Select object to align UCS`. `NA`: `[Restore/Save/Delete/?]` and a name. The view turns so the new X axis is level. See [Turn the view and use your own coordinates](topic:ucs-and-turned-view).
+
+### PLAN
+
+No aliases. `Enter an option [Current ucs/Ucs/World] <Current ucs>`: turns the active pane's view so that UCS's X axis (or the world's) is level. Nothing in the drawing moves.
+
+### TURNLEFT, TURNRIGHT, TURNWORLD
+
+No aliases; or {{ui:View}} › {{ui:More}} › {{ui:Turn view 90° left}}, {{ui:Turn view 90° right}}, {{ui:Back to world}}. The same as `UCS Z -90`, `UCS Z 90` and `UCS W`, with the view following.
+
+### VPLAYER
+
+No aliases. On a sheet, or inside a viewport. `Enter an option [?/Freeze/Thaw/Reset/Vpvisdflt]`: `F`, `T`, `R` ask for layer names (commas, `*` and `?` wildcards), then `[All/Select/Current] <Current>` viewports; Reset puts each layer back to its "frozen in new viewports" default; `V` sets that default (`[Frozen/Thawed]`), which {{cmd:MVIEW}} uses. `?` lists the layers frozen in the current viewport. The Layers panel's viewport column does the same for one viewport. See [Freeze a layer in one viewport](topic:sheets-and-viewports#freeze-a-layer-in-one-viewport).
+
+### MSPACE
+
+Aliases: `MS`; or double-click inside a viewport. On a sheet only. Work on the model through a viewport: the one selected, the only one on the sheet, or `Click inside the viewport to work in`. Pan and zoom inside change the viewport's view (a display-locked one keeps it and the sheet moves instead); the new view is written as one undo step. See [Work on the model through a viewport](topic:sheets-and-viewports#work-on-the-model-through-a-viewport).
+
+### PSPACE
+
+Aliases: `PS`; or double-click outside the viewport, or click a tab under the drawing. Back to the sheet.
 
 ### PLOT
 

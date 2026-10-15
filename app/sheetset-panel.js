@@ -19,7 +19,7 @@
 
 import {
   readSheetSet, writeSheetSet, newSheetSet, allSheets, sheetLabel, findSheet, findSubset, addSheet, removeSheet, moveSheet,
-  updateSheet, addSubset, renameSubset, removeSubset, renumber, setProperties, layoutNameFor, EXT, SheetSetError,
+  updateSheet, addSubset, renameSubset, removeSubset, renumber, setProperties, layoutNameFor, EXT, SheetSetError, numberByRule, ruleProblem,
 } from './sheetset.js';
 import { layoutsIn, publishSet, updateDrawings, openDrawing, addSheetList } from './sheetset-io.js';
 import { saveDwg } from './dwg-save.js';
@@ -139,6 +139,7 @@ export function createSheetSetPanel({ root, el, t, ask, print, host, openSheet }
   }
   function edit(next, said) {
     if (!next || next === state.set) return;
+    if (next.numbering?.auto) next = numberByRule(next);   // WL.10: a field changed → the numbers follow
     state.undo.push(state.set); state.redo.length = 0;
     if (state.undo.length > 100) state.undo.shift();
     state.set = next;
@@ -284,11 +285,18 @@ export function createSheetSetPanel({ root, el, t, ask, print, host, openSheet }
     if (sel.kind === 'set') { await properties(); return; }
     const s = findSheet(state.set, sel.id);
     const v = await formDialog({ title: t('sheetset.rename.sheet'), text: t('sheetset.rename.text'), fields: [
-      { key: 'number', label: t('sheetset.f.number'), value: s.number, max: 255 },
+      { key: 'number', label: t('sheetset.f.number'), value: s.number, max: 255, ...(state.set.numbering?.auto ? { hint: t('sheetset.rule.number_hint', { rule: state.set.numbering.rule }) } : {}) },
       { key: 'title', label: t('sheetset.f.title'), value: s.title, max: 255 },
       { key: 'description', label: t('sheetset.f.description'), value: s.description || '', multi: true },
+      // the sheet's own fields (WL.10: DISCIPLINE = A, LEVEL = 1 feed a numbering rule)
+      { key: 'fields', label: t('sheetset.f.sheetfields'), value: Object.entries(s.properties || {}).map(([k, x]) => k + ' = ' + x).join('\n'), multi: true, hint: t('sheetset.f.custom.hint') },
     ] });
-    if (v) edit(updateSheet(state.set, s.id, v), t('sheetset.rename.done', { sheet: sheetLabel({ ...s, ...v }) }));
+    if (v) {
+      const p = {};
+      for (const line of String(v.fields || '').split('\n')) { const m = /^\s*([A-Za-z][A-Za-z0-9_ ]{0,63})\s*=\s*(.*)$/.exec(line); if (m) p[m[1].trim().toUpperCase().replace(/\s+/g, '_')] = m[2].trim(); }
+      const { fields, ...rest } = v;   // eslint-disable-line no-unused-vars
+      edit(updateSheet(state.set, s.id, { ...rest, properties: p }), t('sheetset.rename.done', { sheet: sheetLabel({ ...s, ...rest }) }));
+    }
   }
   async function removeSel() {
     const sel = state.sel;
@@ -302,6 +310,23 @@ export function createSheetSetPanel({ root, el, t, ask, print, host, openSheet }
     const s = findSheet(state.set, sel.id);
     const k = await ask({ title: t('sheetset.remove.sheet.title'), text: t('sheetset.remove.sheet.text', { sheet: sheetLabel(s), file: s.file }), buttons: [['cancel', t('sheetset.cancel'), 'btn-line'], ['ok', t('sheetset.remove'), 'btn-plot']] });
     if (k === 'ok') { state.sel = null; edit(removeSheet(state.set, s.id), t('sheetset.remove.done', { sheet: sheetLabel(s) })); }
+  }
+  // WL.10: a numbering rule from fields ({DISCIPLINE}-{LEVEL}{SEQ:2}), applied now and (optionally) after every edit
+  async function numberingDlg() {
+    if (!state.set) return;
+    const cur = state.set.numbering || { rule: '{DISCIPLINE}-{LEVEL}{SEQ:2}', start: 1, auto: true };
+    for (;;) {
+      const v = await formDialog({ title: t('sheetset.rule.title'), text: t('sheetset.rule.text'), fields: [
+        { key: 'rule', label: t('sheetset.rule.rule'), value: cur.rule, max: 120, hint: t('sheetset.rule.hint') },
+        { key: 'start', label: t('sheetset.rule.start'), value: String(cur.start ?? 1), type: 'number' },
+        { key: 'auto', label: t('sheetset.rule.auto'), value: cur.auto ? 'yes' : 'no', choices: [['yes', t('sheetset.rule.auto.yes')], ['no', t('sheetset.rule.auto.no')]] },
+      ] });
+      if (!v) return;
+      const why = ruleProblem(v.rule);
+      if (why) { print(t(why)); Object.assign(cur, { rule: v.rule }); continue; }
+      edit(numberByRule(state.set, { rule: v.rule, start: +v.start, auto: v.auto === 'yes' }), t('sheetset.rule.done', { n: allSheets(state.set).length }));
+      return;
+    }
   }
   async function renumberDlg() {
     const inSub = selectedSubset();
@@ -407,7 +432,7 @@ export function createSheetSetPanel({ root, el, t, ask, print, host, openSheet }
 
   const actions = {
     open: openSet, new: newSet, close: closeSet, add: addSheets, newsheet: newSheet, subset: newSubset, rename: renameSel, remove: removeSel,
-    renumber: renumberDlg, props: properties, publish, update, list: sheetList, archive, undo, redo, download: downloadSet,
+    renumber: renumberDlg, numbering: numberingDlg, props: properties, publish, update, list: sheetList, archive, undo, redo, download: downloadSet,
   };
   menu?.addEventListener('click', (e) => {
     const b = e.target.closest('[data-ss]');

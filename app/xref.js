@@ -37,6 +37,10 @@ export function xrefs(doc) {
 /** Bring the other drawing in as the link `name` (new: a free name from the file). Inside doc.change. */
 export function attachXref(doc, src, fileName, { name = null } = {}) {
   let root = name;
+  // a reload keeps what was set on the link's layers — colour, linetype, lineweight, on/off, freeze, lock, plot (as
+  // AutoCAD's VISRETAIN 1); they also arrive this way from a saved DWG, where the link's layers stay "Plan|Walls" (WL.15)
+  const retained = new Map();
+  if (root) for (const l of doc.layerState().list) if (l.name.startsWith(root + '|')) retained.set(l.name, l);
   if (!root) {
     const base = blockNameFromFile(fileName) || 'Xref';
     root = base;
@@ -56,7 +60,9 @@ export function attachXref(doc, src, fileName, { name = null } = {}) {
   let layers = 0;
   for (const l of src.layers || []) {
     if (!l.name || l.name === '0' || s.list.some((x) => x.name === p + l.name)) continue;
-    s.list.push({ name: p + l.name, color: l.color ?? 7, on: l.on !== false, frozen: !!l.frozen, locked: !!l.locked, plot: l.plot !== false, linetype: l.linetype || 'Continuous', lineweight: Number.isFinite(l.lineweight) ? l.lineweight : -3 });
+    const own = { name: p + l.name, color: l.color ?? 7, on: l.on !== false, frozen: !!l.frozen, locked: !!l.locked, plot: l.plot !== false, linetype: l.linetype || 'Continuous', lineweight: Number.isFinite(l.lineweight) ? l.lineweight : -3, ...(Number.isFinite(l.tr) ? { tr: l.tr } : {}) };
+    const kept = retained.get(p + l.name);
+    s.list.push(kept ? { ...own, ...kept, name: p + l.name } : own);
     layers++;
   }
   doc.setLayerState(s);

@@ -1,16 +1,16 @@
 ---
 title: Use CadCraft with an AI assistant
-summary: Let your own AI assistant or script work with CadCraft: what it may do, how to connect Claude Desktop, Claude Code and other MCP clients, and how you stay in charge (permissions, undo, the activity log, Disconnect).
+summary: Let your own AI assistant or script work with CadCraft: what it may do, how to connect any MCP client, and how you stay in charge (permissions, undo, the activity log, Disconnect).
 section: tasks
 order: 60
-keywords: ai, assistant, agent, mcp, model context protocol, claude, claude code, claude desktop, script, automation, command line, cli, json, token, permissions, disconnect, activity
+keywords: ai, assistant, agent, mcp, model context protocol, script, automation, command line, cli, json, token, permissions, disconnect, activity
 ---
 
 ## What you will learn
 
 How to let an AI assistant (or a script you wrote) look at a drawing, run CadCraft's commands, plot and save, and how to decide what it is allowed to touch.
 
-CadCraft has **no AI of its own** and sends nothing anywhere. You bring the assistant: Claude Desktop, Claude Code or any program that speaks the Model Context Protocol (MCP). CadCraft only gives it tools, and you choose which.
+CadCraft has **no AI of its own** and sends nothing anywhere. You bring the assistant: any program that speaks the Model Context Protocol (MCP). CadCraft only gives it tools, and you choose which.
 
 There are two ways in:
 
@@ -36,8 +36,7 @@ Tools outside the permissions you ticked are not offered to the assistant at all
 
 Assistants connect through **CadCraft Studio** on your computer: it runs a small server that only this computer can reach (address `127.0.0.1`), protected by a token that Studio makes each time it starts. Open Studio, choose {{ui:Connect an assistant}}, and copy the address and the token.
 
-- **Claude Code:** run the command Studio shows, which looks like `claude mcp add --transport http cadcraft http://127.0.0.1:47615/mcp --header "Authorization: Bearer <token>"`.
-- **Claude Desktop and other MCP clients:** add a server of type HTTP with the address, and the header `Authorization: Bearer <token>`. Studio shows the settings to paste.
+- In your assistant, add an MCP server of type HTTP with the address (it looks like `http://127.0.0.1:47615/mcp`) and the header `Authorization: Bearer <token>`. Studio shows the settings to paste.
 
 {{ui:New token}} in Studio makes every connected assistant reconnect with the new token. Never share the token: anyone with it can use the apps you switched on, for as long as Studio is running.
 

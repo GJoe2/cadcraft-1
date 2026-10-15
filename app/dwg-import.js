@@ -21,6 +21,9 @@ import { face3dFromDwg, read3dFromDwg } from './model3d.js';
 import { t } from './i18n.js';
 import { vportsFrom } from './dwg-vports.js';
 import { trFrom, propsFromXdata, stFromVars, stFromCodes, ccDimFrom, dstyleMap } from './dwg-props.js';
+import { dynBlockFromDwg, dynRefFromDwg, dynSource } from './dyn-blocks.js';   // 0.5 DB.2
+import { pictureBlock } from './pictures.js';   // 0.5 WL.14
+import { clipFromFilter } from './xclip.js';   // 0.5 WL.16
 
 export const VERSIONS = {
   AC1009: 'R12', AC1012: 'R13', AC1014: 'R14', AC1015: '2000', AC1018: '2004',
@@ -60,12 +63,14 @@ export function importDwg(db, { versionTag = '' } = {}) {
     .map((l) => ({ name: l.name, description: l.description || '', pattern: (l.elements || []).map((x) => +x.length || 0) }));
   const ltName = (v) => (v === undefined || v === null || v === '' ? null : ltByHandle.get(String(v).toUpperCase()) || String(v));
   const lwMm = (v) => (v === -2 || v === -3 ? v : Number.isFinite(v) && v >= 0 ? v / 100 : undefined);   // 1/100 mm → mm; -1 by layer = absent
+  const layerByHandle = new Map((db.tables?.layers || []).map((l) => [String(l.handle || '').toUpperCase(), l.name]));   // VP.1
+  const vpOverrides = layerOverrides(db, ltName);   // VP.3: viewport handle → { layer: { color, lt, lw, tr } }
   const layers = (db.tables?.layers || []).map((l) => {
     const c = l.color || {};
     const color = c.rgb !== undefined ? hex(c.rgb) : (Math.abs(c.index ?? 7) || 7);
     const lw = lwMm(l.lineweight);
     return { name: l.name, color, on: !l.off, frozen: !!l.frozen, locked: !!l.locked, plot: l.plot !== false && String(l.name).toUpperCase() !== 'DEFPOINTS',
-      linetype: ltName(l.linetype) || 'Continuous', lineweight: lw === undefined || lw === -2 ? -3 : lw };
+      linetype: ltName(l.linetype) || 'Continuous', lineweight: lw === undefined || lw === -2 ? -3 : lw, ...(l.frozenInNewViewports ? { newVpFrozen: true } : {}) };   // VP.2: frozen in new viewports
   });
 
   // dimension styles: the header's settings, then each named style
@@ -93,10 +98,19 @@ export function importDwg(db, { versionTag = '' } = {}) {
   const taken = new Set(blockList.map((b) => String(b.name).toUpperCase()));
   const freeName = (pre) => { let n; do n = pre + (++anonN); while (taken.has(n.toUpperCase())); taken.add(n.toUpperCase()); return n; };
   const imageDefs = new Map((db.objects || []).filter((o) => o.type === 'IMAGEDEF').map((o) => [o.handle, o]));
+  const objByH = new Map((db.objects || []).map((o) => [String(o.handle), o]));   // dictionaries and filters by handle (WL.16)
   let parametric = null;   // CadCraft's constraints (gcons.js): block CADCRAFT_PARAMETRIC
   for (const b of blockList) {
     if (/^\*(model|paper)_space/i.test(b.name)) continue;
     if (isParamBlock(b.name)) { parametric = parametricText((b.entities || []).map(convert).filter(Boolean)); continue; }
+    // a dynamic block (definition or a reference's copy) keeps its hidden entities too (dyn-blocks.js, 0.5 DB.2)
+    const dynB = dynBlockFromDwg(b, { convert, attdefOf, defName: b.dynamicOf ? blockList.find((x) => x.record === b.dynamicOf)?.name : null,
+      record: (db.tables?.blockRecords || []).find((r) => r.handle === b.record) });
+    if (dynB) {
+      blocks.push({ name: b.name, base: { x: b.base?.x || 0, y: b.base?.y || 0 }, entities: dynB.entities, ...(dynB.attdefs.length ? { attdefs: dynB.attdefs } : {}), dyn: dynB.dyn });
+      report.dynamicBlocks = (report.dynamicBlocks || 0) + (dynB.dyn.def ? 1 : 0);
+      continue;
+    }
     const ents = [], attdefs = [];
     for (const e of b.entities || []) {
       if (e.type === 'ATTDEF') { const d = attdefOf(e); if (d) attdefs.push(d); continue; }
@@ -157,7 +171,9 @@ export function importDwg(db, { versionTag = '' } = {}) {
       ...lengthFormat(H) },
     views: namedViews(db.tables?.views, layouts),
     vports: splitScreen(db.tables?.vports),
+    ...ucsFrom(H, db.tables?.ucs, db.tables?.vports),   // DR.8: the current and named UCSs, the active view's twist
     textStyles, dimStyles: namedDimStyles,
+    ...(report.dynamicBlocks ? { dynSrc: dynSource(db) } : {}),   // what keeps them dynamic on save
     report,
   });
 
@@ -285,13 +301,11 @@ export function importDwg(db, { versionTag = '' } = {}) {
     const frame = { type: 'poly', closed: true, pts: clip.map(W) };
     if (e.type === 'WIPEOUT') { report.wipeouts = (report.wipeouts || 0) + 1; return { ...frame, ...base }; }
     const def = imageDefs.get(e.def);
-    const file = String(def?.fileName || '').split(/[\\/]/).pop() || 'image';
-    const ll = W({ x: -0.5, y: h - 0.5 }), lr = W({ x: w - 0.5, y: h - 0.5 });
-    const rot = Math.atan2(lr.y - ll.y, lr.x - ll.x), side = Math.hypot(v.x, v.y) * h;
-    const th = Math.max(1e-9, Math.min(side / 8, Math.hypot(lr.x - ll.x, lr.y - ll.y) / Math.max(4, file.length)));
+    const file = String(def?.fileName || '').trim() || 'image';
+    // the picture's placement on its frame (pictures.js): lower-left corner, one pixel along and up, its size in pixels
+    const pic = { file, x: p.x, y: p.y, ux: u.x, uy: u.y, vx: v.x, vy: v.y, w, h, ...(e.fade > 0 ? { fade: e.fade } : {}) };
     const name = freeName('*I');
-    blocks.push({ name, base: { x: 0, y: 0 }, entities: [{ ...frame, layer: '0', color: 0 },
-      { type: 'text', layer: '0', color: 0, x: ll.x + (Math.cos(rot) - Math.sin(rot)) * th * 0.5, y: ll.y + (Math.sin(rot) + Math.cos(rot)) * th * 0.5, h: th, rot: normAngle(rot), s: file, ha: 'left', va: 'baseline' }] });
+    blocks.push(pictureBlock(name, pic, e.clipping && Array.isArray(e.clip) && e.clip.length >= 2 ? frame.pts : null));
     report.images = (report.images || 0) + 1;
     return { type: 'insert', ...base, block: name, x: 0, y: 0, sx: 1, sy: 1, rot: 0 };
   }
@@ -308,7 +322,17 @@ export function importDwg(db, { versionTag = '' } = {}) {
   }
 
   /** One model entity → CadCraft's, with CadCraft's own xdata keys (CCREF) kept. */
-  function convert(e) { return withProps(tagFromXdata(convertBase(e), e.xdata), e); }
+  function convert(e) {
+    const c = withProps(tagFromXdata(convertBase(e), e.xdata), e);
+    const one = Array.isArray(c) ? c[0] : c;
+    if (e.type === 'INSERT' && e.dyn && one && one.type === 'insert') { const d = dynRefFromDwg(e); if (d) one.dyn = d; }   // a dynamic block reference (0.5 DB.2)
+    if (e.type === 'INSERT' && e.extDict && one && one.type === 'insert') {   // XCLIP (0.5 WL.16): xdict → ACAD_FILTER → SPATIAL
+      const f = objByH.get(String(objByH.get(String(objByH.get(String(e.extDict))?.entries?.ACAD_FILTER))?.entries?.SPATIAL));
+      const clip = f && f.type === 'SPATIAL_FILTER' ? clipFromFilter(f) : null;
+      if (clip) one.clip = clip;
+    }
+    return c;
+  }
   /** The Properties panel's fields a file keeps (P.3–P.7; dwg-props.js): transparency, thickness, Z, and what xdata holds. */
   function withProps(c, e) {
     if (!c || (Array.isArray(c) && !c.length)) return c;
@@ -391,7 +415,7 @@ export function importDwg(db, { versionTag = '' } = {}) {
         const q = /^\\Q(-?[\d.]+);/.exec(String(e.value || ''));   // an oblique angle as the text's first format code (how CadCraft writes it)
         const obl = q && Number.isFinite(+q[1]) && +q[1] ? +q[1] * Math.PI / 180 : 0;
         return { type: 'text', ...base, x: e.insert.x, y: e.insert.y, h: e.height, rot: normAngle(rot), s, ha: ['left', 'center', 'right'][ap % 3], va: ['top', 'middle', 'bottom'][Math.floor(ap / 3)], ...(ww ? { ww } : {}), ...(ls ? { ls } : {}),
-          ...styleName(e.style), ...(obl ? { obl } : {}) };
+          ...styleName(e.style), ...(obl ? { obl } : {}), ...maskOf(e) };
       }
       case 'SOLID': case 'TRACE': {
         const p = e.points || [];   // DXF order: the outline runs 1, 2, 4, 3
@@ -462,17 +486,27 @@ export function importDwg(db, { versionTag = '' } = {}) {
         const c = e.center, t = e.viewTarget || { x: 0, y: 0 }, dc = e.viewCenter || c;
         if (!c || !(e.width > 0) || !(e.height > 0)) return null;
         const s = e.viewHeight > 0 ? e.height / e.viewHeight : 1;
-        if (e.twist) report.twisted = (report.twisted || 0) + 1;
         const vp = { type: 'viewport', ...base, x: c.x, y: c.y, w: e.width, h: e.height, cx: dc.x + (t.x || 0), cy: dc.y + (t.y || 0), s };
+        if (Number.isFinite(e.twist) && Math.abs(e.twist) > 1e-12) vp.tw = e.twist;   // a twisted view (DR.8: viewportMatrix turns it)
         const stt = Number(e.status) >>> 0;   // status flags (P.7): 16384 display locked, 131072 off
         if (stt & 16384) vp.locked = true;
         if (stt & 131072) vp.on = false;
+        // layers frozen in this viewport (VP.1): handles → names; an unknown handle is dropped
+        const frz = [...new Set((e.frozenLayers || []).map((h) => layerByHandle.get(String(h || '').toUpperCase())).filter((n) => typeof n === 'string' && n))];
+        if (frz.length) vp.frz = frz;
+        const lov = vpOverrides.get(String(e.handle || '').toUpperCase());   // per-viewport layer overrides (VP.3)
+        if (lov) vp.lov = lov;
         // CadCraft's own record of the sheet on its first viewport (dwg-save.js; as in its DXF): name, unit, size key, paper
         const cc = xdataOf(e.xdata, 'CADCRAFT').map(([, v]) => v);
         if (cc[0] === 'LAYOUT' && [4, 5, 6, 7].every((i) => Number.isFinite(+cc[i]))) vp.cc = { unit: cc[2] === 'in' ? 'in' : 'mm', key: String(cc[3] || ''), x0: +cc[4], y0: +cc[5], w: +cc[6], h: +cc[7] };
         return vp;
       }
-      case 'ATTDEF': case 'XLINE': case 'RAY': return null;   // ATTDEFs are read with their block (attdefOf)
+      case 'XLINE': case 'RAY': {   // construction lines (0.5 DR.7): a point and a unit direction, as cad-draw's DR.6 has them
+        const d = e.direction, n = d ? Math.hypot(d.x, d.y) : 0;
+        if (!e.start || !Number.isFinite(e.start.x) || !(n > 1e-12)) { skip(e.type); return null; }
+        return { type: type === 'XLINE' ? 'xline' : 'ray', ...base, x: e.start.x, y: e.start.y, dx: d.x / n, dy: d.y / n };   // world coordinates (no OCS)
+      }
+      case 'ATTDEF': return null;   // ATTDEFs are read with their block (attdefOf)
       default: skip(e.type === 'UNKNOWN' ? e.dxfName || 'UNKNOWN' : e.type); return null;
     }
   }
@@ -493,6 +527,53 @@ function textOf(e, base, X = (x) => x) {
     va: h === 4 || v === 2 ? 'middle' : v === 3 ? 'top' : v === 1 ? 'bottom' : 'baseline',
     ...styleName(e.style), ...(Number.isFinite(e.oblique) && Math.abs(e.oblique) > 1e-12 ? { obl: e.oblique } : {}),
   };
+}
+
+/**
+ * MTEXT's background mask (0.5 WL.8: DWG/DXF 90 flags, 63/421 colour, 45 border offset scale) → { bgm: { color, scale } }:
+ * color 'bg' = the drawing window's colour (flag 2), else an ACI number or '#rrggbb'.
+ */
+export function maskOf(e) {
+  const f = Number(e.backgroundFlags) | 0;
+  if (!(f & 1)) return {};
+  const c = e.backgroundColor || {};
+  const color = f & 2 ? 'bg' : c.rgb !== undefined ? '#' + (c.rgb & 0xffffff).toString(16).padStart(6, '0') : Math.abs(c.index ?? 7) || 7;
+  const sc = Number(e.backgroundScale);
+  return { bgm: { color, scale: Number.isFinite(sc) && sc >= 1 && sc <= 5 ? sc : 1.5 } };
+}
+
+/**
+ * Per-viewport layer overrides (0.5 VP.3): each layer's extension dictionary holds XRECORDs ADSK_XREC_LAYER_COLOR_OVR,
+ * _LINETYPE_OVR, _LINEWT_OVR, _ALPHA_OVR (and _PLOTSTYLE_OVR, kept out): pairs of 335 (the viewport) and a value — 420
+ * colour word (method 0xC3 = an index in the low byte, 0xC2 = a true colour), 343 linetype, 91 lineweight (1/100 mm),
+ * 440 transparency word. Spec gap: XRECORD contents; found on files ezdxf writes and the ODA File Converter re-saves.
+ * → Map(viewport handle → { LayerName: { color?, lt?, lw?, tr? } })
+ */
+export function layerOverrides(db, ltName = (x) => x) {
+  const out = new Map(), objs = new Map((db.objects || []).map((o) => [String(o.handle).toUpperCase(), o]));
+  const put = (vp, layer, k, v) => { const key = String(vp || '').toUpperCase(); if (!key) return; if (!out.has(key)) out.set(key, {}); const m = out.get(key); (m[layer] || (m[layer] = {}))[k] = v; };
+  for (const l of db.tables?.layers || []) {
+    const d = l.extDict && objs.get(String(l.extDict).toUpperCase());
+    for (const [name, h] of Object.entries(d?.entries || {})) {
+      const m = /^ADSK_XREC_LAYER_(COLOR|LINETYPE|LINEWT|ALPHA)_OVR$/.exec(name), x = m && objs.get(String(h).toUpperCase());
+      if (!x || x.type !== 'XRECORD') continue;
+      let vp = null;
+      for (const [c, v] of x.data || []) {
+        if (c === 335) { vp = v; continue; }
+        if (!vp) continue;
+        if (m[1] === 'COLOR' && (c === 420 || c === 62)) {
+          const w = Number(v) >>> 0, how = c === 62 ? 0xc3 : w >>> 24;
+          if (how === 0xc2) put(vp, l.name, 'color', '#' + (w & 0xffffff).toString(16).padStart(6, '0'));
+          else if (how === 0xc3 || c === 62) { const i = c === 62 ? Math.abs(Number(v)) : w & 0xff; if (i >= 1 && i <= 255) put(vp, l.name, 'color', i); }
+        } else if (m[1] === 'LINETYPE' && c === 343) { const n = ltName(v); if (n) put(vp, l.name, 'lt', n); }
+        else if (m[1] === 'LINEWT' && c === 91) { const n = Number(v); if (n >= 0 && n <= 211) put(vp, l.name, 'lw', n / 100); }
+        else if (m[1] === 'ALPHA' && c === 440) { const tr = trFrom(Number(v)); if (tr !== undefined) put(vp, l.name, 'tr', tr); }
+        else continue;
+        vp = null;
+      }
+    }
+  }
+  return out;
 }
 
 /** A text style name other than Standard → { style } (P.7). */
@@ -522,9 +603,23 @@ export function splitScreen(list) {
   const recs = (list || []).filter((v) => v && /^\*active$/i.test(v.name || '')).map((v) => {
     const sheet = xdataOf(v.xdata, 'CADCRAFT').map(([, s]) => String(s)).find((s) => s.startsWith('PANESHEET:'));
     return { x0: v.lowerLeft?.x, y0: v.lowerLeft?.y, x1: v.upperRight?.x, y1: v.upperRight?.y, cx: v.viewCenter?.x ?? v.center?.x, cy: v.viewCenter?.y ?? v.center?.y,
-      h: v.viewHeight, ...(sheet ? { sheet: sheet.slice(10) } : {}) };
+      h: v.viewHeight, tw: Number.isFinite(v.twist) ? v.twist : 0, ...(sheet ? { sheet: sheet.slice(10) } : {}) };
   });
   return vportsFrom(recs);
+}
+
+/**
+ * DR.8: $UCSORG / $UCSXDIR → the current UCS ({ x, y, ang }, null when it is the world), the UCS table → the named ones,
+ * the first *Active VPORT's twist → viewTwist (one pane; a split screen keeps each pane's own). Validated in doc.load.
+ */
+export function ucsFrom(H, table, vports) {
+  const ucsOf = (o, x) => (o && x && Number.isFinite(o.x) && Number.isFinite(o.y) && (x.x || x.y) ? { x: o.x, y: o.y, ang: Math.atan2(x.y, x.x) } : null);
+  let current = ucsOf(H?.UCSORG, H?.UCSXDIR);
+  if (current && Math.abs(current.x) < 1e-12 && Math.abs(current.y) < 1e-12 && Math.abs(current.ang) < 1e-12) current = null;
+  const named = (table || []).map((u) => { const c = ucsOf(u.origin, u.xAxis); return c && u.name ? { name: String(u.name), ...c } : null; }).filter(Boolean);
+  const act = (vports || []).find((v) => v && /^\*active$/i.test(v.name || ''));
+  const tw = Number.isFinite(act?.twist) ? act.twist : 0;
+  return { ...(current || named.length ? { ucs: { current, named } } : {}), ...(tw ? { viewTwist: tw } : {}) };
 }
 
 /** The VIEW table → doc.views; a paper-space view goes on the first sheet (DWG does not say which). */

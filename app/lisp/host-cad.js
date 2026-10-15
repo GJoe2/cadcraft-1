@@ -19,6 +19,7 @@ import { lassoHits } from '../lasso.js';
 import { entityBounds, textLayout, snapPoints, SNAP_KINDS } from '../geom.js';
 import { t } from '../i18n.js';
 import { vlaCall } from './vla-host.js';
+import { activeUcs, toWorld as ucsToWorld, toUcs, vecToWorld, vecToUcs } from '../ucs.js';
 
 export const PAUSE = '\\';
 const OSNAP_OVERRIDE = /^_?(non|none|end|endp|mid|int|cen|nea|per|qua|tan|ins|nod|app|ext|par|gcen|mtp)$/i;
@@ -78,7 +79,8 @@ export class CadHost {
     this.errno = 0;
     const c = this.c, kws = parseKeywords(o.kw), flags = vnum(o.flags) | 0;
     const options = kws.map((k) => ({ key: k.key, label: k.label, hidden: true }));
-    const base = Array.isArray(o.base) ? { x: o.base[0], y: o.base[1] } : null;
+    const uc = activeUcs(this.doc);   // routines see points and angles in the UCS, as AutoCAD hands them (DR.8)
+    const base = Array.isArray(o.base) ? ucsToWorld(uc, { x: o.base[0], y: o.base[1] }) : null;
     const DEF = { point: t('lisp.get.point'), corner: t('lisp.get.corner'), dist: t('lisp.get.dist'), angle: t('lisp.get.angle'), orient: t('lisp.get.angle'),
       real: t('lisp.get.real'), int: t('lisp.get.int'), string: t('lisp.get.string'), kword: t('lisp.get.kword') };
     const prompt = cleanPrompt(o.msg, DEF[kind] || '');
@@ -92,7 +94,7 @@ export class CadHost {
           try { r = await c.point(prompt, { base, none: true, options, accept: arbitrary }); } finally { c.preview(null); }
           break;
         case 'dist': r = await c.distance(prompt, { base, none: true, options, accept: arbitrary }); break;
-        case 'angle': case 'orient': r = await c.angle(prompt, { base, none: true, options, accept: arbitrary }); break;
+        case 'angle': case 'orient': r = await c.angle(prompt, { base, none: true, options, accept: arbitrary, ucs: true }); if (typeof r === 'number' && uc) r -= uc.ang; break;
         case 'real': case 'int': r = await c.number(prompt, { none: true, options, accept: arbitrary }); break;
         case 'string': r = await c.string(prompt, { raw: true }); return { value: String(r ?? '') };
         case 'kword': r = await c.keyword(prompt, { none: true, options, accept: arbitrary }); break;
@@ -107,7 +109,7 @@ export class CadHost {
         if (flags & 1) { this.print(t('lisp.get.required')); continue; }
         return { none: true };
       }
-      if (kind === 'point' || kind === 'corner') return { value: [r.x, r.y, 0] };
+      if (kind === 'point' || kind === 'corner') { const q = toUcs(uc, r); return { value: [q.x, q.y, 0] }; }
       if (typeof r === 'number') {
         if (kind === 'int' && !Number.isInteger(r)) { this.print(t('lisp.get.needint')); continue; }
         if (kind === 'int' && Math.abs(r) > 32767) { this.print(t('lisp.get.intrange')); continue; }
@@ -302,7 +304,7 @@ export class CadHost {
     if (typeof a === 'string') { E.text(a); return; }
     if (typeof a === 'number' || isI(a)) { E.text(numText(vnum(a))); return; }
     if (Array.isArray(a) && a.length >= 2 && a.every((x) => typeof x === 'number' || isI(x))) {
-      const p = { x: vnum(a[0]), y: vnum(a[1]) };
+      const p = ucsToWorld(activeUcs(this.doc), { x: vnum(a[0]), y: vnum(a[1]) });   // a routine's point is in the UCS
       if (w.kind === 'point' || w.kind === 'distance' || w.kind === 'angle' || w.kind === 'select' || w.kind === 'entity') { if (!E.click(p, p) && w.kind === 'select') { /* nothing there */ } return; }
       E.text(numText(p.x) + ',' + numText(p.y));
       return;
@@ -314,7 +316,7 @@ export class CadHost {
     if (a && a.e !== undefined) { pickIds([a.e]); return; }
     if (a && Array.isArray(a.ids)) { pickIds(a.ids); return; }
     if (Array.isArray(a) && a[0] && a[0].e !== undefined) {   // an entsel result: (ename point)
-      const p = Array.isArray(a[1]) ? { x: vnum(a[1][0]), y: vnum(a[1][1]) } : null;
+      const p = Array.isArray(a[1]) ? ucsToWorld(activeUcs(this.doc), { x: vnum(a[1][0]), y: vnum(a[1][1]) }) : null;
       if (w.kind === 'entity' && p) { E.resolve({ id: a[0].e, point: p }); return; }
       pickIds([a[0].e]);
       return;
@@ -323,6 +325,21 @@ export class CadHost {
   }
 
   cmdActive() { return this.nested ? 1 : 0; }
+
+  /**
+   * (trans pt from to [disp]): between 0 = world, 1 = the UCS and 2 = the display (the view's turn about its target, the
+   * origin); an entity name or an extrusion vector stands for the world (2D objects lie in it). `disp` = a direction.
+   */
+  trans(p, from, to, disp = false) {
+    const u = activeUcs(this.doc), tw = this.ui.viewTwist?.() || 0;
+    const code = (x) => (typeof x === 'number' && (x === 1 || x === 2) ? x : 0);
+    const q = { x: +p[0] || 0, y: +p[1] || 0 };
+    const rot = (v, a) => ({ x: v.x * Math.cos(a) - v.y * Math.sin(a), y: v.x * Math.sin(a) + v.y * Math.cos(a) });
+    const toW = { 0: (v) => v, 1: (v) => (disp ? vecToWorld(u, v) : ucsToWorld(u, v)), 2: (v) => rot(v, tw) };
+    const fromW = { 0: (v) => v, 1: (v) => (disp ? vecToUcs(u, v) : toUcs(u, v)), 2: (v) => rot(v, -tw) };
+    const r = fromW[code(to)](toW[code(from)](q));
+    return p.length > 2 ? [r.x, r.y, +p[2] || 0] : [r.x, r.y];
+  }
 
   // ---- system variables ----
   getvar(name) {
@@ -343,6 +360,13 @@ export class CadHost {
       case 'DIMASZ': return doc.current.dim?.asz ?? 2.5;
       case 'DIMDEC': return I(doc.current.dim?.dec ?? 2);
       case 'CTAB': return this.spaceName();
+      // the UCS and the view's turn (DR.8)
+      case 'UCSORG': { const u = activeUcs(doc); return u ? [u.x, u.y, 0] : [0, 0, 0]; }
+      case 'UCSXDIR': { const u = activeUcs(doc); return u ? [Math.cos(u.ang), Math.sin(u.ang), 0] : [1, 0, 0]; }
+      case 'UCSYDIR': { const u = activeUcs(doc); return u ? [-Math.sin(u.ang), Math.cos(u.ang), 0] : [0, 1, 0]; }
+      case 'WORLDUCS': return I(activeUcs(doc) ? 0 : 1);
+      case 'UCSNAME': { const u = activeUcs(doc); if (!u) return '*WORLD*'; const n = (doc.ucsNamed || []).find((x) => Math.abs(x.x - u.x) < 1e-9 && Math.abs(x.y - u.y) < 1e-9 && Math.abs(x.ang - u.ang) < 1e-12); return n ? n.name : ''; }
+      case 'VIEWTWIST': return this.ui.viewTwist?.() || 0;
       case 'TILEMODE': return I(doc.layout ? 0 : 1);
       case 'CVPORT': return I(doc.layout ? 1 : 2);
       case 'DWGNAME': return (m.name || 'Drawing1') + (/\.(dwg|dxf)$/i.test(m.name || '') ? '' : '.dwg');
@@ -582,7 +606,7 @@ export class CadHost {
       case 'DIMSTYLE': return [{ name: 'Standard', pairs: namePairs('DIMSTYLE', 'Standard') }];
       case 'APPID': return ['ACAD', 'CADCRAFT'].map((n) => ({ name: n, pairs: namePairs('APPID', n) }));
       case 'VPORT': return [{ name: '*Active', pairs: namePairs('VPORT', '*Active') }];
-      case 'UCS': return [];
+      case 'UCS': return (doc.ucsNamed || []).map((u) => ({ name: u.name, pairs: [...namePairs('UCS', u.name), [10, [u.x, u.y, 0]], [11, [Math.cos(u.ang), Math.sin(u.ang), 0]], [12, [-Math.sin(u.ang), Math.cos(u.ang), 0]]] }));
       default: return null;
     }
   }

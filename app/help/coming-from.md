@@ -34,6 +34,10 @@ If you have used AutoCAD, or a program built on the same model, most of what you
 
 The [Command reference](topic:commands) lists every command and alias.
 
+:::tip
+If you like the ribbon of AutoCAD, pick the {{ui:Drafting classic}} menu style in {{ui:Settings}} › {{ui:CadCraft}} › {{ui:Menus, keys and mouse}}: Home, Insert, Annotate, Parametric, View, Manage and Output tabs over the same command line, and the middle button pans while a right click is Enter. See [Menus, keys and mouse](topic:menus-keys-and-mouse).
+:::
+
 ## Differences that trip people up
 
 ### Typed points are absolute
@@ -76,6 +80,8 @@ A DWG you opened saves in the version it came in; a new drawing saves in the Aut
 
 - Every layer change (on, freeze, lock, color, plot, linetype, lineweight, current layer) is one undo step.
 - Off and freeze have the same effect in CadCraft.
+- Layers a drawing freezes in one viewport stay frozen there: on screen, in plots and when you save it as DWG or DXF.
+- A viewport that shows a layer in its own colour, linetype, lineweight or transparency keeps doing so on screen, in plots and in a saved DWG (DXF keeps the layer's own settings; the save says so). Changing those per viewport is not built yet.
 - There is no layer properties manager and no layer states; {{cmd:RENAME}}, {{cmd:LAYMRG}} and {{cmd:LAYDEL}} rename, merge and delete layers. Linetypes and lineweights are set in the right panel (see [Line weights and linetypes](topic:units-papers-scales#line-weights-and-linetypes)); {{cmd:LAYISO}}, {{cmd:LAYOFF}}, {{cmd:LAYFRZ}} and {{cmd:LAYMCUR}} work by picking.
 - Saving to DXF R12 writes layer names in capitals. A DWG keeps them as you typed them.
 
@@ -87,9 +93,9 @@ There are no named dimension styles to manage. `DIMSCALE` and the other settings
 
 There are no plot style tables (CTB or STB) and no page setups. A plot is black or in drawing colors; lines print at their lineweight, the others at one pen width. Sheets plot at 1:1 on their own paper; the model plots at a chosen scale or fitted. See [Plot to PDF](topic:plot-pdf).
 
-### Viewports are not entered
+### Working inside a viewport
 
-Double-clicking inside a viewport does not take you into model space through it. To edit the model, use the {{ui:Model}} tab. To change what a viewport shows, select its frame and use the Properties panel or {{cmd:VPVIEW}}.
+As you know it: double-click inside a viewport (or type {{cmd:MSPACE}}) to work on the model through it, and double-click outside it (or {{cmd:PSPACE}}) to go back to the sheet. Inside, pan and zoom change what the viewport shows, unless its display is locked; then they move the sheet. Clicking a tab under the drawing also leaves the viewport. See [Work on the model through a viewport](topic:sheets-and-viewports#work-on-the-model-through-a-viewport).
 
 ### Tracking and dynamic input yes, grid snap not yet
 

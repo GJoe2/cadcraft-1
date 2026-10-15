@@ -3,7 +3,7 @@ title: Files: what opens, what saves
 summary: The formats CadCraft opens, saves and exports, what is kept or converted, and where the files go.
 section: start
 order: 30
-keywords: dwg, dxf, pdf, r12, open, save, export, import, formats, conversion, download, saveas, dxfout, save as, dwg save, format, qsave, xref, xattach, linked drawing, external reference, bind, reload, detach
+keywords: xclip, clip, xclip boundary, bind clipped, dwg, dxf, pdf, r12, open, save, export, import, formats, conversion, download, saveas, dxfout, save as, dwg save, format, qsave, xref, xattach, linked drawing, external reference, bind, reload, detach
 ---
 
 ## At a glance
@@ -39,7 +39,7 @@ The DWG reader is part of CadCraft and is fetched with the first DWG you open af
 
 ### What does not come in yet
 
-Anything CadCraft cannot draw is counted, not guessed at. The "About this file" box in the left panel lists it as "Not shown yet:" followed by each kind of object and how many. Typical cases are tables in a DXF, and 3D solids, regions and meshes. Viewports that are twisted in the file are shown square to the sheet, and the box says so.
+Anything CadCraft cannot draw is counted, not guessed at. The "About this file" box in the left panel lists it as "Not shown yet:" followed by each kind of object and how many. Typical cases are tables in a DXF, and 3D solids, regions and meshes. Viewports twisted in the file show turned, as there, and keep their twist when you save; so do the current UCS, the named UCSs and a turned view.
 
 Text is drawn in one Helvetica-style font. A label that fits on one line in the original program's narrower font can wrap onto two lines in CadCraft.
 
@@ -117,9 +117,11 @@ To keep working on a drawing over several days, save as DXF and open that DXF ne
 
 ## Linked drawings (external references)
 
-{{cmd:XATTACH}} (`XA`, or {{ui:Blocks}} › {{ui:More}} › {{ui:Link a drawing (xref)}}) links another DWG or DXF: pick the file, then click where it goes ({{key:Enter}} puts it at 0,0). It comes in as one block named after the file, at the right scale when the two drawings have different units. Its layers and blocks keep their names with the link's name in front — `Plan|Walls`, `Plan|Door` — so they never mix with yours: turn the linked layers on and off, freeze or lock them like your own. A link is read-only: change the other drawing and reload it.
+{{cmd:XATTACH}} (`XA`, or {{ui:Blocks}} › {{ui:More}} › {{ui:Link a drawing (xref)}}) links another DWG or DXF: pick the file, then click where it goes ({{key:Enter}} puts it at 0,0). It comes in as one block named after the file, at the right scale when the two drawings have different units. Its layers and blocks keep their names with the link's name in front — `Plan|Walls`, `Plan|Door` — so they never mix with yours: turn the linked layers on and off, freeze or lock them like your own. A link is read-only: change the other drawing and reload it. What you set on a link's layers (colour, linetype, lineweight, on/off, freeze, lock, plot) is kept when you reload it, when you save the drawing as DWG while the link is still a link, and when another drawing links this one.
 
 {{cmd:XREF}} (`XR`): `?` lists the links (loaded or not, which file, how many references); `A` attaches; `R` reloads one from its file (pick the file again: the browser cannot reach your folders on its own); `B` binds one (it becomes ordinary blocks and layers named `Plan$0$Walls`); `D` detaches one (its references and layers go). Each is one undo step.
+
+{{cmd:XCLIP}} (`XC`) clips block references and links: select them, `N` for a new boundary, then `R` and two corners or `P` and the points of a polygon ({{key:Enter}} closes it); `D` removes the clip. Only what lies inside shows and plots, and the clip moves with the reference. DWG and DXF 2000 keep clips; DXF R12 saves the reference whole and says so. When you bind a link that has clipped references, {{cmd:XREF}} `B` asks: `A` binds everything, `C` keeps only each reference's clipped part (lines and arcs are cut at the boundary; texts and nested blocks stay when their insertion point is inside).
 
 A drawing you open may link files CadCraft cannot see: it says how many are not loaded. Use {{cmd:XREF}}, `R` and pick each file to see them.
 
@@ -170,9 +172,8 @@ A sketch exported from a part modeler (`.json`) opens too: see [Move sketches to
 ## Not available yet
 
 - Multileaders as multileader objects in a saved DXF (R12 has none: they are saved as what they draw).
-- Pictures (images) shown in the drawing, and wipeouts that hide what is under them.
-- Saving a newer DXF version than R12.
+- Pictures in a saved DXF (they save as their frames; DWG keeps them as pictures), and wipeouts that hide what is under them.
+- Saving a newer DXF version than 2000.
 - Cloud saving and sync between computers.
-- A desktop version that works outside the browser.
 
 See [Not built yet](topic:not-built-yet) for the full list.

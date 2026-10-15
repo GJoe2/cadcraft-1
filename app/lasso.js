@@ -13,7 +13,7 @@
  *   nextMode(mode) → the mode Space switches to
  */
 
-import { prims, primPoint, intersect, entityBounds, validBounds, emptyBounds, growPt, fenceHits, dist, EPS } from './geom.js';
+import { prims, primPoint, intersect, entityBounds, validBounds, emptyBounds, growPt, fenceHits, dist, EPS, UNBOUNDED } from './geom.js';
 import { pointInPoly } from './lasso-core.js';
 // the modes, the first-move rule, Space and path thinning are shared with the other 2D apps (lasso-core.js, a copied module)
 export { LASSO_MODES, nextMode, lassoMode, thin, pointInPoly } from './lasso-core.js';
@@ -40,6 +40,10 @@ export function lassoHits(entities, pts, mode, blocks, boundsOf = (e) => entityB
   const edges = edgesOf(pts);
   const out = [];
   for (const e of list) {
+    if (UNBOUNDED.has(e.type)) {   // a construction line (0.5 DR.6) is never inside a lasso; crossing, it is caught where it cuts or starts inside
+      if (mode === 'crossing' && (prims(e).some((p) => edges.some((ed) => intersect(p, ed).length)) || (e.type === 'ray' && pointInPoly(e, pts)))) out.push(e.id);
+      continue;
+    }
     const b = boundsOf(e);
     if (!b || !validBounds(b)) continue;
     if (b.maxX < lb.minX || b.minX > lb.maxX || b.maxY < lb.minY || b.minY > lb.maxY) continue;

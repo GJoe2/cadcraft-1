@@ -26,6 +26,7 @@ The snaps you can use are:
 | Quadrant | The 0, 90, 180 and 270 degree points of circles and arcs |
 | Intersection | Where two objects cross |
 | Perpendicular | The point on an object square to the last point (needs a base point) |
+| Tangent | The point on a circle or arc where a line from the last point just touches it. With no last point yet (a line's first point), the marker says "deferred": the touch point is worked out once the next point is known, so a line from Tangent to Tangent touches both circles |
 | Nearest | The nearest point on any object |
 | Node | Point objects |
 | Insertion | The insertion point of text and block references |
