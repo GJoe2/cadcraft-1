@@ -556,6 +556,8 @@ test(`random edits from four people converge (${FUZZ} steps)`, async () => {
 if (!fs.existsSync(BIN)) {
   const { spawnSync } = await import('node:child_process');
   const cargo = spawnSync('cargo', ['--version'], { encoding: 'utf8' });
+  const shell = path.resolve(ROOT, '..', 'desktop-shell/src-tauri/src/live/mod.rs');   // the server builds the desktop shell's Live module in
+  if (!fs.existsSync(shell)) { console.log('Skipped: the Live server builds from the desktop-shell repository, which is not beside this one (getcadcraft/desktop-shell).'); process.exit(0); }
   if (cargo.status !== 0) { console.log('Skipped: live-server is not built and Rust (cargo) is not installed. Build it with: (cd tools/live-test/server && cargo build --release)'); process.exit(0); }
   console.log('Building live-server (cargo build --release) …');
   const b = spawnSync('cargo', ['build', '--release', '--quiet'], { cwd: path.join(ROOT, 'tools/live-test/server'), stdio: 'inherit' });
