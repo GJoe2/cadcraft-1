@@ -168,21 +168,29 @@ function init(root) {
     root.setAttribute('data-ribbon', mode);
     try { localStorage.setItem('cadcraft.ribbon_state', mode); } catch {}
 
-    const cycleBtns = document.querySelectorAll('[data-ribbon-cycle]');
-    cycleBtns.forEach((btn) => {
-      btn.title = RIBBON_TITLES[mode] || RIBBON_TITLES.full;
-      const icon = btn.querySelector('.bi');
-      if (icon && !btn.classList.contains('app-bar-btn')) {
+    // Update ribbon dropdown menu checkmarks
+    document.querySelectorAll('[data-ribbon-set]').forEach((btn) => {
+      btn.setAttribute('aria-checked', String(btn.dataset.ribbonSet === mode));
+    });
+
+    // Update Settings radio buttons
+    settingsDlg?.querySelectorAll('input[name="ccRibbonDisplay"]').forEach((r) => {
+      r.checked = r.value === mode;
+    });
+
+    // Update App Bar summary icon, label, and title
+    const ribbonBtn = document.querySelector('.app-bar-ribbon');
+    if (ribbonBtn) {
+      ribbonBtn.title = RIBBON_TITLES[mode] || RIBBON_TITLES.full;
+      const icon = ribbonBtn.querySelector('.bi:not(.app-bar-chevron)');
+      if (icon) {
         icon.className = `bi ${RIBBON_ICONS[mode] || RIBBON_ICONS.full}`;
       }
-      const label = btn.querySelector('span:not(.app-bar-btn-label)');
+      const label = ribbonBtn.querySelector('.app-bar-btn-label');
       if (label) {
-        label.textContent = RIBBON_LABELS[mode] || RIBBON_LABELS.full;
+        label.textContent = mode === 'symbols' ? 'Ribbon: Icons' : mode === 'text' ? 'Ribbon: Text' : 'Ribbon';
       }
-      if (btn.classList.contains('app-bar-btn')) {
-        btn.setAttribute('aria-pressed', String(mode !== 'full'));
-      }
-    });
+    }
 
     view.resize();
   };
@@ -212,6 +220,13 @@ function init(root) {
     ribbonRowsState = mode;
     root.setAttribute('data-ribbon-rows', mode);
     try { localStorage.setItem('cadcraft.ribbon_rows', mode); } catch {}
+
+    // Update ribbon dropdown menu checkmarks
+    document.querySelectorAll('[data-ribbon-rows-set]').forEach((btn) => {
+      btn.setAttribute('aria-checked', String(btn.dataset.ribbonRowsSet === mode));
+    });
+
+    // Update Settings radio buttons
     settingsDlg?.querySelectorAll('input[name="ccRibbonRows"]').forEach((r) => {
       r.checked = r.value === mode;
     });
@@ -227,18 +242,41 @@ function init(root) {
   }
 
   document.addEventListener('click', (e) => {
-    const btn = e.target.closest('[data-ribbon-cycle]');
-    if (btn) {
+    const setBtn = e.target.closest('[data-ribbon-set]');
+    if (setBtn) {
       e.preventDefault();
-      if (e.shiftKey) {
-        cycleRibbonRows();
-      } else {
-        cycleRibbon();
-      }
+      applyRibbonState(setBtn.dataset.ribbonSet);
+      const label = setBtn.dataset.ribbonSet === 'symbols' ? 'Just icons' : setBtn.dataset.ribbonSet === 'text' ? 'Just text' : 'Icons + text';
+      if (typeof print === 'function') print(`Ribbon: ${label}`);
+      const d = setBtn.closest('details');
+      if (d) d.open = false;
+      return;
+    }
+    const rowBtn = e.target.closest('[data-ribbon-rows-set]');
+    if (rowBtn) {
+      e.preventDefault();
+      applyRibbonRows(rowBtn.dataset.ribbonRowsSet);
+      const label = rowBtn.dataset.ribbonRowsSet === 'auto' ? 'Auto-wrap' : rowBtn.dataset.ribbonRowsSet === '2' ? '2 rows' : '1 row (scrollable)';
+      if (typeof print === 'function') print(`Ribbon rows: ${label}`);
+      const d = rowBtn.closest('details');
+      if (d) d.open = false;
+      return;
+    }
+    // Close ribbon dropdown menu if clicking outside
+    const ribbonMenu = document.querySelector('details.app-bar-ribbon-menu');
+    if (ribbonMenu && ribbonMenu.open && !ribbonMenu.contains(e.target)) {
+      ribbonMenu.open = false;
     }
   });
 
   window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      const ribbonMenu = document.querySelector('details.app-bar-ribbon-menu');
+      if (ribbonMenu && ribbonMenu.open) {
+        ribbonMenu.open = false;
+        ribbonMenu.querySelector('summary')?.focus();
+      }
+    }
     if (e.key === 'F1' && e.ctrlKey && !e.altKey && !e.metaKey) {
       e.preventDefault();
       if (e.shiftKey) {
@@ -264,15 +302,17 @@ function init(root) {
   if (settingsDlg) {
     settingsDlg.querySelectorAll('input[name="ccCursor"]').forEach((r) => { r.checked = r.value === settings.cursor; });
     for (const [name, key] of Object.entries(RADIO_SETTINGS)) settingsDlg.querySelectorAll('input[name="' + name + '"]').forEach((r) => { r.checked = r.value === settings[key]; });
+    settingsDlg.querySelectorAll('input[name="ccRibbonDisplay"]').forEach((r) => { r.checked = r.value === ribbonState; });
     settingsDlg.querySelectorAll('input[name="ccRibbonRows"]').forEach((r) => { r.checked = r.value === ribbonRowsState; });
     settingsDlg.addEventListener('change', (e) => {
       if (e.target.name === 'ccCursor') setCursor(e.target.value);
+      else if (e.target.name === 'ccRibbonDisplay') applyRibbonState(e.target.value);
       else if (e.target.name === 'ccRibbonRows') applyRibbonRows(e.target.value);
       else if (RADIO_SETTINGS[e.target.name]) setRadio(e.target.name, e.target.value);
       if (e.target.name === 'ccCorner') applyCorner();
       if (e.target.name === 'ccTabs') renderTabs();
     });
-    settingsDlg.addEventListener('cc-settings-reset', () => { setCursor('medium'); setRadio('ccPaste', 'lower-left'); setRadio('ccPick', 'add'); setRadio('ccCorner', 'auto'); setRadio('ccLasso', 'lasso'); setRadio('ccTabs', 'full'); applyCorner(); renderTabs(); applyRibbonRows('auto'); });
+    settingsDlg.addEventListener('cc-settings-reset', () => { setCursor('medium'); setRadio('ccPaste', 'lower-left'); setRadio('ccPick', 'add'); setRadio('ccCorner', 'auto'); setRadio('ccLasso', 'lasso'); setRadio('ccTabs', 'full'); applyCorner(); renderTabs(); applyRibbonState('full'); applyRibbonRows('auto'); });
   }
 
   applyRibbonState(ribbonState);

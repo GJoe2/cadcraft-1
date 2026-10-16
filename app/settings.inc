@@ -68,6 +68,15 @@
   <p class="shell-hint-text"><?= Lang::e('set.tabs.hint') ?></p>
 </fieldset>
 <fieldset class="shell-set">
+  <legend><?= Lang::e('set.ribbon_display') ?></legend>
+  <div class="shell-seg" role="radiogroup" aria-label="<?= Lang::e('set.ribbon_display') ?>">
+    <label><input type="radio" name="ccRibbonDisplay" value="full"> <i class="bi bi-grid-3x2-gap" aria-hidden="true"></i> <?= Lang::e('set.ribbon_display_full') ?></label>
+    <label><input type="radio" name="ccRibbonDisplay" value="symbols"> <i class="bi bi-fonts" aria-hidden="true"></i> <?= Lang::e('set.ribbon_display_symbols') ?></label>
+    <label><input type="radio" name="ccRibbonDisplay" value="text"> <i class="bi bi-layout-text-window" aria-hidden="true"></i> <?= Lang::e('set.ribbon_display_text') ?></label>
+  </div>
+  <p class="shell-hint-text"><?= Lang::e('set.ribbon_display_hint') ?></p>
+</fieldset>
+<fieldset class="shell-set">
   <legend><?= Lang::e('set.ribbon_rows') ?></legend>
   <div class="shell-seg" role="radiogroup" aria-label="<?= Lang::e('set.ribbon_rows') ?>">
     <label><input type="radio" name="ccRibbonRows" value="auto"> <i class="bi bi-text-wrap" aria-hidden="true"></i> <?= Lang::e('set.ribbon_rows_auto') ?></label>
