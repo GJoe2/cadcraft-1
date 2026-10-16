@@ -20,13 +20,10 @@
 .cc-tools {
   grid-area: tools;
   display: flex;
-  flex-wrap: nowrap;
-  align-items: stretch;
+  flex-wrap: wrap;
   gap: 0;
   background: var(--sheet-2);
   border-bottom: var(--pen-2) solid var(--ink);
-  overflow-x: auto;
-  overflow-y: hidden;
   scrollbar-width: thin;
   position: relative;
 }
@@ -38,8 +35,7 @@
 /* Sticky ribbon cycle button on right end of toolbar */
 .cc-tools-end {
   margin-left: auto;
-  position: sticky;
-  right: 0;
+  align-self: flex-start;
   display: flex;
   align-items: center;
   padding: .15rem .35rem;
@@ -155,8 +151,15 @@
 }
 
 /* ---- Toolbar Rows / Layers Configuration ---- */
-/* 1 row (default): single row with horizontal scrollbar */
-.cc .cc-tools,
+/* Auto-wrap (default): fluid multi-row wrap without height restriction, matching original CadCraft */
+.cc:not([data-ribbon-rows]) .cc-tools,
+.cc[data-ribbon-rows="auto"] .cc-tools {
+  flex-wrap: wrap;
+  overflow: visible;
+  max-height: none;
+}
+
+/* 1 row: single row with horizontal scrollbar */
 .cc[data-ribbon-rows="1"] .cc-tools {
   flex-wrap: nowrap;
   overflow-x: auto;
@@ -171,21 +174,14 @@
   overflow-y: hidden;
   max-height: none;
 }
-.cc[data-ribbon-rows="2"]:not([data-ribbon="symbols"]):not([data-ribbon="text"]) .cc-tool {
+.cc[data-ribbon-rows="2"]:not([data-ribbon="symbols"]) .cc-tool {
   min-width: 2.35rem;
   padding: .2rem .18rem .18rem;
 }
-.cc[data-ribbon-rows="2"]:not([data-ribbon="symbols"]):not([data-ribbon="text"]) .cc-tool-group {
+.cc[data-ribbon-rows="2"]:not([data-ribbon="symbols"]) .cc-tool-group {
   padding: .2rem .25rem .25rem;
 }
 
-/* Auto-wrap: fluid multi-row wrap without height restriction */
-.cc[data-ribbon-rows="auto"] .cc-tools {
-  flex-wrap: wrap;
-  overflow-x: visible;
-  overflow-y: visible;
-  max-height: none;
-}
 .cc-tool {
   display: flex;
   flex-direction: column;
@@ -203,7 +199,7 @@
   cursor: pointer;
   white-space: nowrap;
 }
-.cc-tool .bi { font-size: 1.15rem; line-height: 1; color: var(--layer); }
+.cc-tool .bi { font-size: 1.15rem; line-height: 1; color: var(--layer); display: inline-block !important; }
 .cc-tool:hover { border-color: var(--line); background: var(--sheet); }
 .cc-tool:focus-visible { outline: var(--pen-3) solid var(--action); outline-offset: 1px; }
 .cc-tool[aria-pressed="true"] { border-color: var(--ink); background: var(--sheet); }

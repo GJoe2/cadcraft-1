@@ -141,6 +141,15 @@ function init(root) {
     hidden: 'Show ribbon',
   };
 
+  // One-time cleanup for any stale pre-fix localStorage states
+  try {
+    if (!localStorage.getItem('cadcraft.ribbon_fixed_v1')) {
+      localStorage.removeItem('cadcraft.ribbon_state');
+      localStorage.removeItem('cadcraft.ribbon_rows');
+      localStorage.setItem('cadcraft.ribbon_fixed_v1', '1');
+    }
+  } catch {}
+
   let ribbonState = (() => {
     try {
       const s = localStorage.getItem('cadcraft.ribbon_state');
@@ -182,19 +191,19 @@ function init(root) {
     applyRibbonState(RIBBON_MODES[nextIdx]);
   };
 
-  // ---- ribbon rows / layers: 1 (single row), 2 (two rows), auto (fluid wrap) ----
-  const RIBBON_ROW_OPTIONS = ['1', '2', 'auto'];
+  // ---- ribbon rows / layers: auto (fluid wrap), 2 (two rows), 1 (single row) ----
+  const RIBBON_ROW_OPTIONS = ['auto', '2', '1'];
   let ribbonRowsState = (() => {
     try {
       const r = localStorage.getItem('cadcraft.ribbon_rows');
-      return RIBBON_ROW_OPTIONS.includes(r) ? r : '1';
+      return RIBBON_ROW_OPTIONS.includes(r) ? r : 'auto';
     } catch {
-      return '1';
+      return 'auto';
     }
   })();
 
   function applyRibbonRows(mode) {
-    if (!RIBBON_ROW_OPTIONS.includes(mode)) mode = '1';
+    if (!RIBBON_ROW_OPTIONS.includes(mode)) mode = 'auto';
     ribbonRowsState = mode;
     root.setAttribute('data-ribbon-rows', mode);
     try { localStorage.setItem('cadcraft.ribbon_rows', mode); } catch {}
@@ -208,7 +217,7 @@ function init(root) {
     const nextIdx = (RIBBON_ROW_OPTIONS.indexOf(ribbonRowsState) + 1) % RIBBON_ROW_OPTIONS.length;
     const nextMode = RIBBON_ROW_OPTIONS[nextIdx];
     applyRibbonRows(nextMode);
-    const label = nextMode === '1' ? '1 row (scrollable)' : nextMode === '2' ? '2 rows' : 'Auto-wrap';
+    const label = nextMode === 'auto' ? 'Auto-wrap' : nextMode === '2' ? '2 rows' : '1 row (scrollable)';
     if (typeof print === 'function') print(`Ribbon rows: ${label}`);
   }
 
@@ -258,7 +267,7 @@ function init(root) {
       if (e.target.name === 'ccCorner') applyCorner();
       if (e.target.name === 'ccTabs') renderTabs();
     });
-    settingsDlg.addEventListener('cc-settings-reset', () => { setCursor('medium'); setRadio('ccPaste', 'lower-left'); setRadio('ccPick', 'add'); setRadio('ccCorner', 'auto'); setRadio('ccLasso', 'lasso'); setRadio('ccTabs', 'full'); applyCorner(); renderTabs(); applyRibbonRows('1'); });
+    settingsDlg.addEventListener('cc-settings-reset', () => { setCursor('medium'); setRadio('ccPaste', 'lower-left'); setRadio('ccPick', 'add'); setRadio('ccCorner', 'auto'); setRadio('ccLasso', 'lasso'); setRadio('ccTabs', 'full'); applyCorner(); renderTabs(); applyRibbonRows('auto'); });
   }
 
   applyRibbonState(ribbonState);

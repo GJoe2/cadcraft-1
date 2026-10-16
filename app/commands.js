@@ -3299,13 +3299,13 @@ def('RIBBONSTATE', [], async (c) => {
   c.print(`Ribbon state: ${mode}`);
 }, { noRepeat: true, keepSelection: true, help: () => 'Set ribbon display mode: Full, Symbols, or Hidden' });
 def('RIBBONROWS', ['RIBBONROW'], async (c) => {
-  const cur = c.host.getRibbonRows?.() || '1';
+  const cur = c.host.getRibbonRows?.() || 'auto';
   const hidden = (key) => ({ key, label: key, hidden: true });
-  const k = await c.keyword(t('cmd.ribbonrows.prompt', { cur }) || `Enter number of ribbon rows [1/2/Auto] <${cur}>:`, {
+  const k = await c.keyword(t('cmd.ribbonrows.prompt', { cur }) || `Enter number of ribbon rows [Auto/2/1] <${cur}>:`, {
     options: [
-      opt('1', '1 row'),
-      opt('2', '2 rows'),
       opt('A', 'Auto-wrap'),
+      opt('2', '2 rows'),
+      opt('1', '1 row'),
       hidden('AUTO'),
       hidden('WRAP'),
       hidden('SINGLE'),
@@ -3314,8 +3314,9 @@ def('RIBBONROWS', ['RIBBONROW'], async (c) => {
     default: cur === 'auto' ? 'A' : cur,
   });
   const key = String(typeof k === 'string' ? k : k?.option || '').toUpperCase();
-  let mode = '1';
-  if (key === '2' || key === 'DOUBLE') mode = '2';
+  let mode = cur;
+  if (key === '1' || key === 'SINGLE') mode = '1';
+  else if (key === '2' || key === 'DOUBLE') mode = '2';
   else if (key === 'A' || key === 'AUTO' || key === 'WRAP') mode = 'auto';
   c.host.setRibbonRows?.(mode);
   c.print(

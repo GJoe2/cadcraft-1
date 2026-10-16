@@ -70,9 +70,9 @@
 <fieldset class="shell-set">
   <legend><?= Lang::e('set.ribbon_rows') ?></legend>
   <div class="shell-seg" role="radiogroup" aria-label="<?= Lang::e('set.ribbon_rows') ?>">
-    <label><input type="radio" name="ccRibbonRows" value="1"> <i class="bi bi-distribute-horizontal" aria-hidden="true"></i> <?= Lang::e('set.ribbon_rows_1') ?></label>
-    <label><input type="radio" name="ccRibbonRows" value="2"> <i class="bi bi-distribute-vertical" aria-hidden="true"></i> <?= Lang::e('set.ribbon_rows_2') ?></label>
     <label><input type="radio" name="ccRibbonRows" value="auto"> <i class="bi bi-text-wrap" aria-hidden="true"></i> <?= Lang::e('set.ribbon_rows_auto') ?></label>
+    <label><input type="radio" name="ccRibbonRows" value="2"> <i class="bi bi-distribute-vertical" aria-hidden="true"></i> <?= Lang::e('set.ribbon_rows_2') ?></label>
+    <label><input type="radio" name="ccRibbonRows" value="1"> <i class="bi bi-distribute-horizontal" aria-hidden="true"></i> <?= Lang::e('set.ribbon_rows_1') ?></label>
   </div>
   <p class="shell-hint-text"><?= Lang::e('set.ribbon_rows_hint') ?></p>
 </fieldset>
