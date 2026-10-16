@@ -230,8 +230,8 @@ $__more = [
       </div>
     <?php endforeach; ?>
     <div class="cc-tools-end">
-      <button type="button" class="cc-ribbon-cycle-btn" data-ribbon-cycle title="Cycle ribbon: Full / Compact symbols / Minimized (Ctrl+F1)" aria-label="Cycle ribbon display">
-        <i class="bi bi-chevron-bar-up" aria-hidden="true"></i><span>Minimize</span>
+      <button type="button" class="cc-ribbon-cycle-btn" data-ribbon-cycle title="Ribbon: Icons + text — Click for Just icons (Ctrl+F1)" aria-label="Cycle ribbon display">
+        <i class="bi bi-grid-3x2-gap" aria-hidden="true"></i><span>Just icons</span>
       </button>
     </div>
     <input type="file" class="visually-hidden" accept=".dwg,.dxf,.json,.ccsheets,.pln,.pla,.tpl,.bpn,.las,.laz,.xyz,.pts" tabindex="-1" aria-hidden="true" data-file>

@@ -123,63 +123,64 @@ function init(root) {
   view.lwDisplay = settings.lwt;
   view.cursorSize = settings.cursor;
 
-  // ---- ribbon cycle: full -> symbols -> hidden (AutoCAD style, Ctrl+F1) ----
-  const RIBBON_MODES = ['full', 'symbols', 'hidden'];
+  // ---- ribbon cycle: full (icons + text) -> symbols (just icons) -> text (just text) ----
+  const RIBBON_MODES = ['full', 'symbols', 'text'];
   const RIBBON_TITLES = {
-    full: 'Ribbon: Full (Big icons) — Click for Compact symbols (Ctrl+F1, Shift+click for rows)',
-    symbols: 'Ribbon: Compact symbols — Click to Minimize ribbon (Ctrl+F1, Shift+click for rows)',
-    hidden: 'Ribbon: Minimized — Click to Restore full ribbon (Ctrl+F1, Shift+click for rows)',
+    full: 'Ribbon: Icons + text — Click for Just icons (Ctrl+F1, Shift+click for rows)',
+    symbols: 'Ribbon: Just icons — Click for Just text (Ctrl+F1, Shift+click for rows)',
+    text: 'Ribbon: Just text — Click for Icons + text (Ctrl+F1, Shift+click for rows)',
+    hidden: 'Ribbon: Hidden — Click to Restore full ribbon (Ctrl+F1, Shift+click for rows)',
   };
   const RIBBON_ICONS = {
-    full: 'bi-chevron-bar-up',
-    symbols: 'bi-chevron-up',
+    full: 'bi-grid-3x2-gap',
+    symbols: 'bi-fonts',
+    text: 'bi-layout-text-window',
     hidden: 'bi-chevron-down',
   };
   const RIBBON_LABELS = {
-    full: 'Minimize',
-    symbols: 'Minimize',
+    full: 'Just icons',
+    symbols: 'Just text',
+    text: 'Icons + text',
     hidden: 'Show ribbon',
   };
 
   // One-time cleanup for any stale pre-fix localStorage states
   try {
-    if (!localStorage.getItem('cadcraft.ribbon_fixed_v1')) {
+    if (!localStorage.getItem('cadcraft.ribbon_fixed_v2')) {
       localStorage.removeItem('cadcraft.ribbon_state');
       localStorage.removeItem('cadcraft.ribbon_rows');
-      localStorage.setItem('cadcraft.ribbon_fixed_v1', '1');
+      localStorage.setItem('cadcraft.ribbon_fixed_v2', '1');
     }
   } catch {}
 
   let ribbonState = (() => {
     try {
       const s = localStorage.getItem('cadcraft.ribbon_state');
-      if (s === 'text') return 'symbols';
-      return RIBBON_MODES.includes(s) ? s : 'full';
+      return ['full', 'symbols', 'text'].includes(s) ? s : 'full';
     } catch {
       return 'full';
     }
   })();
 
   const applyRibbonState = (mode) => {
-    if (mode === 'text') mode = 'symbols';
-    if (!RIBBON_MODES.includes(mode)) mode = 'full';
+    if (!['full', 'symbols', 'text', 'hidden'].includes(mode)) mode = 'full';
     ribbonState = mode;
     root.setAttribute('data-ribbon', mode);
     try { localStorage.setItem('cadcraft.ribbon_state', mode); } catch {}
 
     const cycleBtns = document.querySelectorAll('[data-ribbon-cycle]');
     cycleBtns.forEach((btn) => {
-      btn.title = RIBBON_TITLES[mode];
+      btn.title = RIBBON_TITLES[mode] || RIBBON_TITLES.full;
       const icon = btn.querySelector('.bi');
-      if (icon) {
-        icon.className = `bi ${RIBBON_ICONS[mode]}`;
+      if (icon && !btn.classList.contains('app-bar-btn')) {
+        icon.className = `bi ${RIBBON_ICONS[mode] || RIBBON_ICONS.full}`;
       }
       const label = btn.querySelector('span:not(.app-bar-btn-label)');
       if (label) {
-        label.textContent = RIBBON_LABELS[mode];
+        label.textContent = RIBBON_LABELS[mode] || RIBBON_LABELS.full;
       }
       if (btn.classList.contains('app-bar-btn')) {
-        btn.setAttribute('aria-pressed', String(mode === 'hidden'));
+        btn.setAttribute('aria-pressed', String(mode !== 'full'));
       }
     });
 
@@ -187,8 +188,12 @@ function init(root) {
   };
 
   const cycleRibbon = () => {
-    const nextIdx = (RIBBON_MODES.indexOf(ribbonState) + 1) % RIBBON_MODES.length;
-    applyRibbonState(RIBBON_MODES[nextIdx]);
+    const curIdx = RIBBON_MODES.indexOf(ribbonState);
+    const nextIdx = curIdx >= 0 ? (curIdx + 1) % RIBBON_MODES.length : 0;
+    const nextMode = RIBBON_MODES[nextIdx];
+    applyRibbonState(nextMode);
+    const label = nextMode === 'symbols' ? 'Just icons' : nextMode === 'text' ? 'Just text' : 'Icons + text';
+    if (typeof print === 'function') print(`Ribbon: ${label}`);
   };
 
   // ---- ribbon rows / layers: auto (fluid wrap), 2 (two rows), 1 (single row) ----

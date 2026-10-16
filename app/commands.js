@@ -3278,14 +3278,17 @@ def('RIBBON', [], async (c) => { c.host.setRibbon?.('full'); }, { noRepeat: true
 def('RIBBONCLOSE', [], async (c) => { c.host.setRibbon?.('hidden'); }, { noRepeat: true, help: () => 'Hide the ribbon toolbar (Ctrl+F1)' });
 def('RIBBONSTATE', [], async (c) => {
   const hidden = (key) => ({ key, label: key, hidden: true });
-  const k = await c.keyword('Enter ribbon display state [Full/Symbols/Hidden] <Full>:', {
+  const k = await c.keyword('Enter ribbon display state [Full/Icons/Text/Hidden] <Full>:', {
     options: [
-      opt('F', 'Full'),
-      opt('S', 'Symbols'),
+      opt('F', 'Full (icons + text)'),
+      opt('I', 'Icons only'),
+      opt('T', 'Text only'),
       opt('H', 'Hidden'),
       hidden('FULL'),
+      hidden('ICONS'),
       hidden('SYMBOLS'),
       hidden('COMPACT'),
+      hidden('TEXT'),
       hidden('HIDDEN'),
       hidden('MIN'),
     ],
@@ -3293,11 +3296,12 @@ def('RIBBONSTATE', [], async (c) => {
   });
   const key = String(typeof k === 'string' ? k : k?.option || '').toUpperCase();
   let mode = 'full';
-  if (key === 'S' || key === 'SYMBOLS' || key === 'COMPACT') mode = 'symbols';
+  if (key === 'I' || key === 'ICONS' || key === 'SYMBOLS' || key === 'COMPACT') mode = 'symbols';
+  else if (key === 'T' || key === 'TEXT') mode = 'text';
   else if (key === 'H' || key === 'HIDDEN' || key === 'MIN') mode = 'hidden';
   c.host.setRibbon?.(mode);
-  c.print(`Ribbon state: ${mode}`);
-}, { noRepeat: true, keepSelection: true, help: () => 'Set ribbon display mode: Full, Symbols, or Hidden' });
+  c.print(`Ribbon state: ${mode === 'symbols' ? 'Just icons' : mode === 'text' ? 'Just text' : mode === 'hidden' ? 'Hidden' : 'Icons + text'}`);
+}, { noRepeat: true, keepSelection: true, help: () => 'Set ribbon display mode: Full (icons + text), Icons only, Text only, or Hidden (RIBBONSTATE)' });
 def('RIBBONROWS', ['RIBBONROW'], async (c) => {
   const cur = c.host.getRibbonRows?.() || 'auto';
   const hidden = (key) => ({ key, label: key, hidden: true });

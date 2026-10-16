@@ -43,7 +43,7 @@
   <button type="button" class="app-bar-btn app-bar-help" data-help-open aria-expanded="false" title="Help (F1)" hidden><i class="bi bi-question-circle" aria-hidden="true"></i><span class="app-bar-btn-label">Help</span></button>
   <button type="button" class="app-bar-btn app-bar-settings" data-settings-open aria-haspopup="dialog" aria-expanded="false" title="Settings (Ctrl+,)" hidden><i class="bi bi-gear" aria-hidden="true"></i><span class="app-bar-btn-label">Settings</span></button>
   <button type="button" class="app-bar-fs" data-fs-cycle aria-pressed="false" hidden><i class="bi bi-fullscreen" aria-hidden="true"></i><span class="app-bar-fs-label">Full screen</span></button>
-  <button type="button" class="app-bar-btn app-bar-ribbon" data-ribbon-cycle aria-pressed="false" title="Cycle ribbon: Full / Compact symbols / Minimized (Ctrl+F1)"><i class="bi bi-layout-sidebar-inset-reverse" aria-hidden="true"></i><span class="app-bar-btn-label">Ribbon</span></button>
+  <button type="button" class="app-bar-btn app-bar-ribbon" data-ribbon-cycle aria-pressed="false" title="Cycle ribbon: Icons + text / Just icons / Just text (Ctrl+F1)"><i class="bi bi-layout-sidebar-inset-reverse" aria-hidden="true"></i><span class="app-bar-btn-label">Ribbon</span></button>
   <form class="space-toggle" method="get" action="/" role="group" aria-label="Drawing space (theme)">
     <button type="submit" name="space" value="paper" aria-pressed="false" title="Paper space: light theme">Paper</button>
     <button type="submit" name="space" value="model" aria-pressed="false" title="Model space: dark theme">Model</button>
@@ -358,8 +358,8 @@
                                       </div>
       </div>
     <div class="cc-tools-end">
-      <button type="button" class="cc-ribbon-cycle-btn" data-ribbon-cycle title="Cycle ribbon: Full / Compact symbols / Minimized (Ctrl+F1)" aria-label="Cycle ribbon display">
-        <i class="bi bi-chevron-bar-up" aria-hidden="true"></i><span>Minimize</span>
+      <button type="button" class="cc-ribbon-cycle-btn" data-ribbon-cycle title="Ribbon: Icons + text — Click for Just icons (Ctrl+F1)" aria-label="Cycle ribbon display">
+        <i class="bi bi-grid-3x2-gap" aria-hidden="true"></i><span>Just icons</span>
       </button>
     </div>
     <input type="file" class="visually-hidden" accept=".dwg,.dxf,.json,.ccsheets,.pln,.pla,.tpl,.bpn,.las,.laz,.xyz,.pts" tabindex="-1" aria-hidden="true" data-file>
