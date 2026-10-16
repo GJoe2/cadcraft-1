@@ -230,7 +230,7 @@ $__more = [
       </div>
     <?php endforeach; ?>
     <div class="cc-tools-end">
-      <button type="button" class="cc-ribbon-cycle-btn" data-ribbon-cycle title="Cycle ribbon: Full / Small symbols / Just text / Hide (Ctrl+F1)" aria-label="Cycle ribbon display">
+      <button type="button" class="cc-ribbon-cycle-btn" data-ribbon-cycle title="Cycle ribbon: Full / Compact symbols / Minimized (Ctrl+F1)" aria-label="Cycle ribbon display">
         <i class="bi bi-chevron-bar-up" aria-hidden="true"></i><span>Minimize</span>
       </button>
     </div>

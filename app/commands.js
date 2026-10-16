@@ -3276,6 +3276,28 @@ def('HELP', ['?'], async (c) => {
 }, { noRepeat: true, keepSelection: true, help: () => t('cmd.help.list') });
 def('RIBBON', [], async (c) => { c.host.setRibbon?.('full'); }, { noRepeat: true, help: () => 'Show the ribbon toolbar (Ctrl+F1)' });
 def('RIBBONCLOSE', [], async (c) => { c.host.setRibbon?.('hidden'); }, { noRepeat: true, help: () => 'Hide the ribbon toolbar (Ctrl+F1)' });
+def('RIBBONSTATE', [], async (c) => {
+  const hidden = (key) => ({ key, label: key, hidden: true });
+  const k = await c.keyword('Enter ribbon display state [Full/Symbols/Hidden] <Full>:', {
+    options: [
+      opt('F', 'Full'),
+      opt('S', 'Symbols'),
+      opt('H', 'Hidden'),
+      hidden('FULL'),
+      hidden('SYMBOLS'),
+      hidden('COMPACT'),
+      hidden('HIDDEN'),
+      hidden('MIN'),
+    ],
+    default: 'F',
+  });
+  const key = String(typeof k === 'string' ? k : k?.option || '').toUpperCase();
+  let mode = 'full';
+  if (key === 'S' || key === 'SYMBOLS' || key === 'COMPACT') mode = 'symbols';
+  else if (key === 'H' || key === 'HIDDEN' || key === 'MIN') mode = 'hidden';
+  c.host.setRibbon?.(mode);
+  c.print(`Ribbon state: ${mode}`);
+}, { noRepeat: true, keepSelection: true, help: () => 'Set ribbon display mode: Full, Symbols, or Hidden' });
 def('RIBBONROWS', ['RIBBONROW'], async (c) => {
   const cur = c.host.getRibbonRows?.() || '1';
   const hidden = (key) => ({ key, label: key, hidden: true });

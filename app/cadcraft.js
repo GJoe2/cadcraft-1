@@ -123,30 +123,28 @@ function init(root) {
   view.lwDisplay = settings.lwt;
   view.cursorSize = settings.cursor;
 
-  // ---- ribbon cycle: full -> symbols -> text -> hidden (AutoCAD style, Ctrl+F1) ----
-  const RIBBON_MODES = ['full', 'symbols', 'text', 'hidden'];
+  // ---- ribbon cycle: full -> symbols -> hidden (AutoCAD style, Ctrl+F1) ----
+  const RIBBON_MODES = ['full', 'symbols', 'hidden'];
   const RIBBON_TITLES = {
-    full: 'Ribbon: Full (Big icons) — Click for Small symbols (Ctrl+F1, Shift+click for rows)',
-    symbols: 'Ribbon: Small symbols — Click for Just text (Ctrl+F1, Shift+click for rows)',
-    text: 'Ribbon: Just text — Click to Hide ribbon (Ctrl+F1, Shift+click for rows)',
-    hidden: 'Ribbon: Hidden — Click to Restore full ribbon (Ctrl+F1, Shift+click for rows)',
+    full: 'Ribbon: Full (Big icons) — Click for Compact symbols (Ctrl+F1, Shift+click for rows)',
+    symbols: 'Ribbon: Compact symbols — Click to Minimize ribbon (Ctrl+F1, Shift+click for rows)',
+    hidden: 'Ribbon: Minimized — Click to Restore full ribbon (Ctrl+F1, Shift+click for rows)',
   };
   const RIBBON_ICONS = {
     full: 'bi-chevron-bar-up',
-    symbols: 'bi-grid-3x2-gap',
-    text: 'bi-fonts',
+    symbols: 'bi-chevron-up',
     hidden: 'bi-chevron-down',
   };
   const RIBBON_LABELS = {
     full: 'Minimize',
-    symbols: 'Symbols',
-    text: 'Text',
+    symbols: 'Minimize',
     hidden: 'Show ribbon',
   };
 
   let ribbonState = (() => {
     try {
       const s = localStorage.getItem('cadcraft.ribbon_state');
+      if (s === 'text') return 'symbols';
       return RIBBON_MODES.includes(s) ? s : 'full';
     } catch {
       return 'full';
@@ -154,6 +152,7 @@ function init(root) {
   })();
 
   const applyRibbonState = (mode) => {
+    if (mode === 'text') mode = 'symbols';
     if (!RIBBON_MODES.includes(mode)) mode = 'full';
     ribbonState = mode;
     root.setAttribute('data-ribbon', mode);
