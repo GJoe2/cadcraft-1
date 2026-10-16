@@ -22,6 +22,7 @@
   display: flex;
   flex-wrap: wrap;
   gap: 0;
+  padding-right: 7rem;
   background: var(--sheet-2);
   border-bottom: var(--pen-2) solid var(--ink);
   scrollbar-width: thin;
@@ -32,44 +33,44 @@
 .cc-tool-label { font-size: .75rem; font-weight: 600; color: var(--ink-2); padding: 0 .2rem .15rem; }
 .cc-tool-row { display: flex; gap: .1rem; }
 
-/* Sticky ribbon cycle button on right end of toolbar */
+/* Pinned ribbon cycle button on top-right of toolbar */
 .cc-tools-end {
-  margin-left: auto;
-  align-self: flex-start;
+  position: absolute;
+  top: .25rem;
+  right: .5rem;
+  z-index: 20;
   display: flex;
   align-items: center;
-  padding: .15rem .35rem;
-  background: var(--sheet-2);
-  border-left: var(--pen-1) solid var(--line);
-  z-index: 10;
-  flex: 0 0 auto;
 }
 .cc-ribbon-cycle-btn {
-  display: flex;
-  flex-direction: column;
+  display: inline-flex;
+  flex-direction: row;
   align-items: center;
-  gap: .1rem;
-  padding: .25rem .35rem .2rem;
+  justify-content: center;
+  gap: .35rem;
+  padding: .2rem .55rem;
   font: inherit;
-  font-size: .6875rem;
+  font-size: .75rem;
   font-weight: 600;
   color: var(--ink-2);
-  background: transparent;
-  border: var(--pen-1) solid transparent;
+  background: var(--sheet-2);
+  border: var(--pen-1) solid var(--line);
   border-radius: var(--radius);
   cursor: pointer;
   white-space: nowrap;
-  min-width: 2.2rem;
+  min-width: 6.2rem;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.06);
 }
 .cc-ribbon-cycle-btn:hover {
   color: var(--ink);
   background: var(--sheet);
-  border-color: var(--line);
+  border-color: var(--ink);
 }
 .cc-ribbon-cycle-btn .bi {
-  font-size: 1.15rem;
+  font-size: .95rem;
   line-height: 1;
   color: var(--ink);
+  display: inline-block !important;
 }
 
 /* Floating un-hide button (legacy fallback, hidden by default as ribbon bar maintains sticky toggle) */
@@ -138,7 +139,8 @@
   border-bottom: var(--pen-1) solid var(--line);
 }
 .cc[data-ribbon="hidden"] .cc-tools-end {
-  margin-left: auto;
+  top: .15rem;
+  right: .5rem;
   border-left: 0;
   padding: 0;
 }
